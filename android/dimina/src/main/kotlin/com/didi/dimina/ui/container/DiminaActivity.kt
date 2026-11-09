@@ -2992,6 +2992,7 @@ class DiminaActivity : ComponentActivity() {
         private const val EXTRA_PATH = "dimina_mp_path"
         private const val EXTRA_VERSION_CODE = "dimina_mp_version_code"
         private const val EXTRA_VERSION_NAME = "dimina_mp_version_name"
+        private const val EXTRA_ICON_PNG = "dimina_mp_icon_png"
         private const val EXTRA_UPDATE_MANIFEST_URL = "dimina_mp_update_manifest_url"
         private const val EXTRA_SCENE = "dimina_mp_scene"
         private const val EXTRA_OPENER_APP_ID = "dimina_mp_opener_app_id"
@@ -3036,6 +3037,7 @@ class DiminaActivity : ComponentActivity() {
                     openerAppId = intent.getStringExtra(EXTRA_OPENER_APP_ID),
                     referrerExtraData = intent.getStringExtra(EXTRA_REFERRER_EXTRA_DATA),
                     envVersion = intent.getStringExtra(EXTRA_ENV_VERSION) ?: "release",
+                    iconPng = intent.getByteArrayExtra(EXTRA_ICON_PNG),
                 )
             }
             // 兼容通道:宿主直接构造 Parcelable extra 的旧用法。Bundle 惰性解包下
@@ -3175,6 +3177,7 @@ class DiminaActivity : ComponentActivity() {
                 putExtra(EXTRA_OPENER_APP_ID, miniProgram.openerAppId)
                 putExtra(EXTRA_REFERRER_EXTRA_DATA, miniProgram.referrerExtraData)
                 putExtra(EXTRA_ENV_VERSION, miniProgram.envVersion)
+                putExtra(EXTRA_ICON_PNG, miniProgram.iconPng)
                 putExtra(HOST_GENERATION_KEY, hostGeneration)
                 putExtra(HOST_SESSION_KEY, hostSession)
                 flag?.let {
