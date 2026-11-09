@@ -135,6 +135,16 @@ class Dimina private constructor(context: Context) {
         MiniApp.getInstance().configureRetention(policy)
     }
 
+    /**
+     * 注册宿主侧升级事件监听(见 [MiniProgramUpdateListener])。
+     *
+     * 升级由框架全权负责:容器后台检测+下载,弹窗问用户,确认后换包冷重启;
+     * 小程序侧不参与升级决策。传 null 注销。回调都在主线程。
+     */
+    fun setOnMiniProgramUpdateListener(listener: MiniProgramUpdateListener?) {
+        MiniApp.getInstance().setOnUpdateListener(listener)
+    }
+
     /** Hosts may forward their own pressure source here as well. */
     fun notifyMemoryPressure() { MiniApp.getInstance().notifyMemoryPressure() }
 
@@ -227,10 +237,28 @@ class Dimina private constructor(context: Context) {
 
     fun shouldShowCapsule(): Boolean = config.showCapsule
 
-    @ColorInt
-    internal fun getCapsuleBackgroundColor(): Int = config.capsuleBackgroundColor
+    // 宿主主题感知(dsh-go 容器按亮度注入):运行时可覆写的胶囊配色,null=用 init 配置。
+    private var capsuleDarkOverride: Boolean? = null
+    private var capsuleBgOverride: Int? = null
+    private var capsuleIconOverride: Int? = null
 
-    internal fun getCapsuleIconColor(): Int = config.capsuleIconColor
+    /** 运行时更新胶囊主题(深色=深底白图标,浅色=白底深图标);下一次重组生效。
+     *  颜色必须显式存:不能在 false 分支回落 config——config 里的颜色是 init 时
+     *  按当时的亮度定死的,回落会让「切浅色」永远切不出去。 */
+    fun updateCapsuleTheme(dark: Boolean) {
+        capsuleDarkOverride = dark
+        capsuleBgOverride = if (dark) 0xFF2A2D34.toInt() else android.graphics.Color.WHITE
+        capsuleIconOverride = if (dark) 0xFFFFFFFF.toInt() else 0xFF1F1F1F.toInt()
+    }
+
+    /** 当前胶囊主题是否深色(菜单等面板配色跟它走)。 */
+    fun isCapsuleThemeDark(): Boolean = capsuleDarkOverride ?: false
+
+    @ColorInt
+    internal fun getCapsuleBackgroundColor(): Int = capsuleBgOverride ?: config.capsuleBackgroundColor
+
+    @ColorInt
+    internal fun getCapsuleIconColor(): Int = capsuleIconOverride ?: config.capsuleIconColor
 
     /** Queries installed disk contents, not whether a runtime is currently alive. */
     fun isExistsApp(appId: String): Boolean = getAppVersionInfo(appId) != null

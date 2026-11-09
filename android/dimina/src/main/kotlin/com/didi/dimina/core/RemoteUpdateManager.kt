@@ -22,10 +22,10 @@ import kotlin.concurrent.withLock
 
 object RemoteUpdateManager {
     private const val TAG = "RemoteUpdateManager"
-    private const val EVENT_NO_UPDATE = "noupdate"
-    private const val EVENT_UPDATING = "updating"
-    private const val EVENT_UPDATE_READY = "updateready"
-    private const val EVENT_UPDATE_FAILED = "updatefail"
+    internal const val EVENT_NO_UPDATE = "noupdate"
+    internal const val EVENT_UPDATING = "updating"
+    internal const val EVENT_UPDATE_READY = "updateready"
+    internal const val EVENT_UPDATE_FAILED = "updatefail"
 
     private val requiredPackagePaths = listOf(
         "config.json",
@@ -350,6 +350,24 @@ object RemoteUpdateManager {
             LogUtils.e(TAG, "Discarding invalid pending package for $appId: ${e.message}")
             pendingDir.deleteRecursively()
             null
+        }
+    }
+
+    /** 已就绪 pending 包的版本信息(磁盘事实;无 pending 或包损坏时为 null)。 */
+    internal class PendingUpdateInfo(val versionCode: Int, val versionName: String)
+
+    /**
+     * 探测已就绪的 pending 新包,供框架升级确认弹窗使用(弹窗问用户后才激活)。
+     * 只读不删:无效 pending 由 [readPendingPackage] 的既有清理逻辑处理。
+     */
+    internal fun peekPendingUpdate(context: Context, appId: String): PendingUpdateInfo? {
+        requireValidAppId(appId)
+        val pending = readPendingPackage(context, appId) ?: return null
+        return try {
+            val config = JSONObject(File(pending.directory, "config.json").readText())
+            PendingUpdateInfo(pending.versionCode, config.optString("versionName"))
+        } catch (e: Exception) {
+            PendingUpdateInfo(pending.versionCode, "")
         }
     }
 

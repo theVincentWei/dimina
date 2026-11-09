@@ -3,6 +3,7 @@ package com.didi.dimina.core
 import android.app.Activity
 import android.content.Context
 import com.didi.dimina.Dimina
+import com.didi.dimina.MiniProgramUpdateListener
 import com.didi.dimina.api.ApiRegistry
 import com.didi.dimina.api.AsyncResult
 import com.didi.dimina.api.BaseApiHandler
@@ -109,6 +110,48 @@ class MiniApp private constructor() {
     private val fileApi = FileApi()
     private val updateCheckRegistry = UpdateCheckRegistry()
 
+    // 框架侧升级事件(MiniProgramUpdateListener):宿主注册,统一主线程回调。
+    private var updateListener: MiniProgramUpdateListener? = null
+    private val updateMainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
+    // 本次运行期用户已拒绝升级的版本(per app):拒绝后同一会话内不再重复弹窗;
+    // app 被 clear(关闭/卸载)即清除,下次打开重新问。
+    private val declinedUpdateVersions = mutableMapOf<String, Int>()
+
+    @androidx.annotation.MainThread
+    fun setOnUpdateListener(listener: MiniProgramUpdateListener?) {
+        updateListener = listener
+    }
+
+    internal fun isUpdateDeclined(appId: String, versionCode: Int): Boolean =
+        synchronized(declinedUpdateVersions) { declinedUpdateVersions[appId] == versionCode }
+
+    internal fun recordUpdateDeclined(appId: String, versionCode: Int) {
+        synchronized(declinedUpdateVersions) { declinedUpdateVersions[appId] = versionCode }
+        notifyUpdateDeclined(appId, versionCode)
+    }
+
+    private fun notifyUpdate(appId: String, notify: (MiniProgramUpdateListener) -> Unit) {
+        updateMainHandler.post {
+            updateListener?.let(notify)
+        }
+    }
+
+    internal fun notifyUpdateReady(appId: String, versionCode: Int, versionName: String) =
+        notifyUpdate(appId) { it.onUpdateReady(appId, versionCode, versionName) }
+
+    internal fun notifyUpdateDeclined(appId: String, versionCode: Int) =
+        notifyUpdate(appId) { it.onUpdateDeclined(appId, versionCode) }
+
+    internal fun notifyUpdateApplied(appId: String, versionCode: Int, versionName: String) =
+        notifyUpdate(appId) { it.onUpdateApplied(appId, versionCode, versionName) }
+
+    internal fun notifyUpdateFailed(appId: String, message: String?) =
+        notifyUpdate(appId) { it.onUpdateFailed(appId, message) }
+
+    internal fun notifyInstalled(appId: String, versionCode: Int, versionName: String) =
+        notifyUpdate(appId) { it.onInstalled(appId, versionCode, versionName) }
+
     // Map to store JsCore instances for each MiniProgram
     private val jsCoreMap = mutableMapOf<String, JsCore>()
 
@@ -204,9 +247,30 @@ class MiniApp private constructor() {
             RemoteUpdateManager.checkForUpdate(
                 context = context.applicationContext,
                 miniProgram = miniProgram,
-                notify = { event -> postUpdateStatus(miniProgram.appId, event) },
+                notify = { event -> onRemoteUpdateEvent(context.applicationContext, miniProgram.appId, event) },
                 operationToken = operationToken,
             )
+        }
+    }
+
+    /**
+     * 后台检查结果统一出口。JS 总线事件保留(wx.getUpdateManager 向后兼容),同时走
+     * 框架链路:新包就绪 → 通知宿主监听器;若小程序正在运行,由容器弹窗问用户,确认后
+     * applyUpdate 换包冷重启。升级决策完全在框架侧,小程序不参与。
+     */
+    private fun onRemoteUpdateEvent(context: Context, appId: String, event: String) {
+        postUpdateStatus(appId, event)
+        when (event) {
+            RemoteUpdateManager.EVENT_UPDATE_READY -> {
+                val pending = RemoteUpdateManager.peekPendingUpdate(context, appId) ?: return
+                notifyUpdateReady(appId, pending.versionCode, pending.versionName)
+                if (!isUpdateDeclined(appId, pending.versionCode)) {
+                    updateMainHandler.post {
+                        DiminaActivity.promptPendingUpdateFromHost(appId, pending.versionCode, pending.versionName)
+                    }
+                }
+            }
+            RemoteUpdateManager.EVENT_UPDATE_FAILED -> notifyUpdateFailed(appId, null)
         }
     }
 
@@ -529,6 +593,10 @@ class MiniApp private constructor() {
         updateCheckRegistry.reset(appId)
         synchronized(this) {
             pendingAppShowOptions.remove(appId)
+        }
+        // 拒绝升级只约束一次运行期;关掉小程序后下次打开重新问。
+        synchronized(declinedUpdateVersions) {
+            declinedUpdateVersions.remove(appId)
         }
         // Silently tear down this owner's WebSocket connections/timers/listeners first,
         // ahead of JsCore.destroy(), so no transport event can race into a dying JsCore.

@@ -38,6 +38,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -59,6 +60,7 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -67,6 +69,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -74,11 +77,14 @@ import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
@@ -131,8 +137,10 @@ import com.didi.dimina.ui.view.VideoCaptureOptions
 import com.didi.dimina.ui.view.NativeComponentHost
 import com.didi.dimina.ui.view.ScanCodeLauncher
 import com.didi.dimina.ui.view.WebViewCacheManager
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -173,6 +181,11 @@ class DiminaActivity : ComponentActivity() {
     private var actionTextColor = "#000000"
     private var actionSheetOptions = listOf<String>()
     private var actionSheetCallback: ((Int) -> Unit)? = null
+
+    // 胶囊收起(dsh-go 契约式):页面触摸 → 收起成贴边小把手;6s 空闲自动展开。
+    private val capsuleCollapsed = mutableStateOf(false)
+    // 主题 tick:每次 resume 自增,胶囊重组时重读容器配色(updateCapsuleTheme 生效)。
+    private val capsuleThemeTick = mutableIntStateOf(0)
 
     private val mediaType = mutableStateOf(MediaType.NONE)
     private val maxImageCount = mutableIntStateOf(1)
@@ -217,6 +230,13 @@ class DiminaActivity : ComponentActivity() {
     // Contact picker for handling contact-related operations
     private lateinit var contactPicker: ContactPicker
     private lateinit var scanCodeLauncher: ScanCodeLauncher
+
+    // ---- 框架升级确认弹窗:升级由框架(容器+宿主)全权负责,小程序侧不参与。 ----
+    // 非 null 时在内容之上渲染 material3「发现新版本」AlertDialog;用户决定经
+    // CompletableDeferred 交回挂起的调用方(冷启动 prepare 门 或 运行中的就绪提示)。
+    private data class PendingUpdatePrompt(val versionCode: Int, val versionName: String)
+    private val pendingUpdatePrompt = mutableStateOf<PendingUpdatePrompt?>(null)
+    private var pendingUpdateChoice: CompletableDeferred<Boolean>? = null
 
     private var imageChooseCallback: ((List<String>) -> Unit)? = null
     private var messageFileChooseCallback: ((Boolean, List<Uri>) -> Unit)? = null
@@ -532,7 +552,14 @@ class DiminaActivity : ComponentActivity() {
         val program = getMiniProgramFromIntent(intent)
 
         if (program == null) {
-            finish()
+            // 陈旧任务记录的 intent 读不出来时必须连任务记录一起删:只 finish
+            // 的话记录还在,系统下次又用它重建本 Activity,死循环「打开即闪退」。
+            LogUtils.e("DiminaActivity", "Unreadable/absent mini program intent (data=${intent.data}, extras=${intent.extras?.keySet()}); removing task")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                finishAndRemoveTask()
+            } else {
+                finish()
+            }
             return
         }
 
@@ -564,6 +591,28 @@ class DiminaActivity : ComponentActivity() {
 
         setContent {
             DiminaAndroidTheme {
+                // 框架升级确认弹窗:新包就绪后问用户是否立即升级(升级由框架负责)。
+                pendingUpdatePrompt.value?.let { prompt ->
+                    AlertDialog(
+                        onDismissRequest = { resolvePendingUpdate(false) },
+                        title = { Text("发现新版本") },
+                        text = {
+                            Text(
+                                if (prompt.versionName.isBlank()) {
+                                    "新版本已准备好(v${prompt.versionCode}),是否立即升级?"
+                                } else {
+                                    "新版本 ${prompt.versionName} 已准备好,是否立即升级?"
+                                }
+                            )
+                        },
+                        confirmButton = {
+                            TextButton(onClick = { resolvePendingUpdate(true) }) { Text("立即升级") }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { resolvePendingUpdate(false) }) { Text("暂不升级") }
+                        },
+                    )
+                }
                 val pageBackgroundColor = parseCssColor(backgroundColor.value)
                 Scaffold(
                     modifier = Modifier.fillMaxSize(),
@@ -679,6 +728,26 @@ class DiminaActivity : ComponentActivity() {
                         miniProgram,
                     )
                     LogUtils.d(tag, "Installed initial mini program package from manifest")
+                    // 首装完成 → 通知宿主监听器(宿主 UI 按真实状态刷新,不再靠轮询猜)。
+                    MiniApp.getInstance().notifyInstalled(
+                        appId, miniProgram.versionCode, miniProgram.versionName,
+                    )
+                } else {
+                    // 框架升级确认:上次运行下载好的 pending 新包还在 → 本次启动前弹窗问
+                    // 用户;确认则先激活再继续(下面的配置读取直接拿到新包),拒绝则照旧
+                    // 跑当前版本。升级决策完全在框架侧,小程序不参与。
+                    val pending = RemoteUpdateManager.peekPendingUpdate(applicationContext, appId)
+                    if (pending != null && pending.versionCode > VersionUtils.getAppVersion(appId) &&
+                        !miniApp.isUpdateDeclined(appId, pending.versionCode)
+                    ) {
+                        val decision = askPendingUpdateDecision(pending.versionCode, pending.versionName)
+                        if (decision == true && RemoteUpdateManager.activatePendingUpdate(applicationContext, appId)) {
+                            miniProgram = miniProgram.copy(versionCode = pending.versionCode)
+                            MiniApp.getInstance().notifyUpdateApplied(appId, pending.versionCode, pending.versionName)
+                        } else if (decision == false) {
+                            miniApp.recordUpdateDeclined(appId, pending.versionCode)
+                        }
+                    }
                 }
             } catch (e: Exception) {
                 LogUtils.e(tag, "Error preparing mini program resources: ${e.message}")
@@ -1633,9 +1702,21 @@ class DiminaActivity : ComponentActivity() {
         super.onStop()
     }
 
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        // 系统深浅色切换「当场生效」:原生侧自行感知(manifest 声明 uiMode,
+        // 不重建 Activity),按新 uiMode 更新胶囊主题并触发重组——不依赖宿主。
+        val dark = (newConfig.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
+            android.content.res.Configuration.UI_MODE_NIGHT_YES
+        Dimina.getInstance().updateCapsuleTheme(dark)
+        capsuleThemeTick.intValue++
+    }
+
     override fun onResume() {
         super.onResume()
         if (destroyedByHost) return
+        // 主题 tick:让胶囊重组重读容器配色(updateCapsuleTheme 在宿主侧发生)。
+        capsuleThemeTick.intValue++
         if (suspendedForMiniProgramNavigation) {
             if (visibilityTracker.onActivityVisible(miniProgram.appId, this)) {
                 dispatchMiniProgramShow()
@@ -1828,6 +1909,13 @@ class DiminaActivity : ComponentActivity() {
                         modifier = Modifier
                             .fillMaxWidth()
                             .weight(1f)
+                            .pointerInput(Unit) {
+                                // 页面触摸 → 胶囊收起成贴边把手(契约式隐藏)。
+                                awaitEachGesture {
+                                    awaitFirstDown(requireUnconsumed = false)
+                                    capsuleCollapsed.value = true
+                                }
+                            }
                     ) {
                         if (useTabBarContainer.value) {
                             loadedTabIndices.value.sorted().forEach { tabIndex ->
@@ -1912,21 +2000,68 @@ class DiminaActivity : ComponentActivity() {
                         statusBarHeight = currentWindowInfo.getInt("statusBarHeight"),
                     )
                 }
-                MiniProgramCapsuleButton(
-                    backgroundColor = Color(Dimina.getInstance().getCapsuleBackgroundColor()),
-                    iconColor = Color(Dimina.getInstance().getCapsuleIconColor()),
-                    onMoreClick = {
-                        showMiniProgramMenu.value = true
-                    },
-                    onCloseClick = { hideMiniProgram() },
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(
-                            top = menuRect.top.dp,
-                            end = (windowInfo.getInt("windowWidth") - menuRect.right).dp
-                        )
-                        .zIndex(10f)
-                )
+                // 主题 tick:resume/宿主注入时重读配色(updateCapsuleTheme 生效)。
+                val capsuleBg = remember(capsuleThemeTick.intValue) {
+                    Color(Dimina.getInstance().getCapsuleBackgroundColor())
+                }
+                val capsuleFg = remember(capsuleThemeTick.intValue) {
+                    Color(Dimina.getInstance().getCapsuleIconColor())
+                }
+                // 收起后 6s 空闲自动展开(契约式隐藏)。
+                LaunchedEffect(capsuleCollapsed.value) {
+                    if (capsuleCollapsed.value) {
+                        delay(6000)
+                        capsuleCollapsed.value = false
+                    }
+                }
+                if (capsuleCollapsed.value) {
+                    // 收起态:贴边小把手,点击展开。
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(top = menuRect.top.dp)
+                            .zIndex(10f)
+                            .size(width = 18.dp, height = 40.dp)
+                            .clip(
+                                RoundedCornerShape(
+                                    topStart = 20.dp, bottomStart = 20.dp, topEnd = 0.dp, bottomEnd = 0.dp
+                                )
+                            )
+                            .background(capsuleBg)
+                            .border(BorderStroke(0.5.dp, Color(0x33000000)), RoundedCornerShape(20.dp))
+                            .clickable { capsuleCollapsed.value = false },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Canvas(modifier = Modifier.size(width = 6.dp, height = 18.dp)) {
+                            drawCircle(
+                                color = capsuleFg,
+                                radius = 2.5.dp.toPx(),
+                                center = Offset(size.width / 2, size.height * 0.32f),
+                            )
+                            drawCircle(
+                                color = capsuleFg,
+                                radius = 2.5.dp.toPx(),
+                                center = Offset(size.width / 2, size.height * 0.68f),
+                            )
+                        }
+                    }
+                } else {
+                    MiniProgramCapsuleButton(
+                        backgroundColor = capsuleBg,
+                        iconColor = capsuleFg,
+                        onMoreClick = {
+                            showMiniProgramMenu.value = true
+                        },
+                        onCloseClick = { hideMiniProgram() },
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(
+                                top = menuRect.top.dp,
+                                end = (windowInfo.getInt("windowWidth") - menuRect.right).dp
+                            )
+                            .zIndex(10f)
+                    )
+                }
             }
         }
     }
@@ -2100,14 +2235,22 @@ class DiminaActivity : ComponentActivity() {
 
     fun applyUpdate() {
         CoroutineScope(Dispatchers.IO).launch {
+            // 激活前先读 pending 版本:激活后 pending 目录已被搬进 active。
+            val pending = RemoteUpdateManager.peekPendingUpdate(applicationContext, miniProgram.appId)
             val activated = RemoteUpdateManager.activatePendingUpdate(
                 applicationContext,
                 miniProgram.appId,
             )
             if (!activated) {
                 miniApp.postUpdateStatus(miniProgram.appId, "updatefail")
+                MiniApp.getInstance().notifyUpdateFailed(miniProgram.appId, null)
                 return@launch
             }
+            MiniApp.getInstance().notifyUpdateApplied(
+                miniProgram.appId,
+                pending?.versionCode ?: VersionUtils.getAppVersion(miniProgram.appId),
+                pending?.versionName ?: "",
+            )
 
             withContext(Dispatchers.Main) {
                 // Read the entry page from the newly activated app-config instead
@@ -2131,6 +2274,53 @@ class DiminaActivity : ComponentActivity() {
         // entire stack first lets Android allocate a new task and leave the old card behind.
         DiminaActivity.launch(this, program)
         activityRegistry.closeAll(miniProgram.appId) { it.finish() }
+    }
+
+    // ---- 框架升级确认弹窗 ----
+
+    /**
+     * 挂起等待用户在「发现新版本」弹窗里的决定。返回 null = 弹窗没能展示
+     * (宿主已销毁或已有弹窗在等);true/false = 用户选了 升级/暂不。
+     * 主线程渲染,可在任意线程挂起调用。
+     */
+    private suspend fun askPendingUpdateDecision(versionCode: Int, versionName: String): Boolean? =
+        withContext(Dispatchers.Main) {
+            if (destroyedByHost || isFinishing || isDestroyed || pendingUpdateChoice != null) {
+                return@withContext null
+            }
+            val choice = CompletableDeferred<Boolean>()
+            pendingUpdateChoice = choice
+            pendingUpdatePrompt.value = PendingUpdatePrompt(versionCode, versionName)
+            try {
+                choice.await()
+            } finally {
+                if (pendingUpdateChoice === choice) {
+                    pendingUpdateChoice = null
+                    pendingUpdatePrompt.value = null
+                }
+            }
+        }
+
+    /** 弹窗按钮/系统返回的回调:关掉弹窗并把用户决定交回挂起的调用方。 */
+    private fun resolvePendingUpdate(confirmed: Boolean) {
+        pendingUpdatePrompt.value = null
+        pendingUpdateChoice?.complete(confirmed)
+        pendingUpdateChoice = null
+    }
+
+    /**
+     * 运行中新包就绪:弹窗问用户。确认 → [applyUpdate](激活+冷重启);
+     * 暂不 → 记录到本会话拒绝表(同一 pending 版本本次运行不再重复弹)。
+     */
+    internal fun promptPendingUpdate(versionCode: Int, versionName: String) {
+        CoroutineScope(Dispatchers.Main).launch {
+            val confirmed = askPendingUpdateDecision(versionCode, versionName)
+            if (confirmed == true) {
+                applyUpdate()
+            } else if (confirmed == false) {
+                miniApp.recordUpdateDeclined(miniProgram.appId, versionCode)
+            }
+        }
     }
 
     private fun getDefaultEntryPagePath(): String? {
@@ -2198,12 +2388,18 @@ class DiminaActivity : ComponentActivity() {
         onCloseClick: () -> Unit,
         onDismiss: () -> Unit
     ) {
+        // 面板配色跟胶囊主题走(dsh-go 宿主按亮度注入,见 miniprogram-spec §8)。
+        val dark = Dimina.getInstance().isCapsuleThemeDark()
+        val sheetContainer = if (dark) Color(0xFF1D1F27) else Color.White
+        val sheetIconBg = if (dark) Color(0xFF2A2D34) else Color(0xFFF4F4F4)
+        val sheetTitle = if (dark) Color(0xFFE8EAED) else Color(0xFF202020)
+        val sheetSub = if (dark) Color(0xFF9AA1A9) else Color(0xFF9A9A9A)
         val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
         ModalBottomSheet(
             onDismissRequest = onDismiss,
             sheetState = sheetState,
             shape = RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp),
-            containerColor = Color.White,
+            containerColor = sheetContainer,
             dragHandle = { }
         ) {
             Column(modifier = Modifier.fillMaxWidth()) {
@@ -2217,7 +2413,7 @@ class DiminaActivity : ComponentActivity() {
                         modifier = Modifier
                             .size(44.dp)
                             .clip(RoundedCornerShape(22.dp))
-                            .background(Color(0xFFF4F4F4)),
+                            .background(sheetIconBg),
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
@@ -2231,13 +2427,13 @@ class DiminaActivity : ComponentActivity() {
                         Text(
                             text = appName,
                             fontSize = 18.sp,
-                            color = Color(0xFF202020),
+                            color = sheetTitle,
                             fontWeight = FontWeight.SemiBold
                         )
                         Text(
                             text = "小程序",
                             fontSize = 14.sp,
-                            color = Color(0xFF9A9A9A)
+                            color = sheetSub
                         )
                     }
                 }
@@ -2559,6 +2755,20 @@ class DiminaActivity : ComponentActivity() {
 
     companion object {
         const val MINI_PROGRAM_KEY = "mini_program"
+
+        // 字段化启动参数(见 [launch]):parcel 对象 extra 在混淆构建下是雷。
+        private const val EXTRA_APP_ID = "dimina_mp_app_id"
+        private const val EXTRA_NAME = "dimina_mp_name"
+        private const val EXTRA_ROOT = "dimina_mp_root"
+        private const val EXTRA_PATH = "dimina_mp_path"
+        private const val EXTRA_VERSION_CODE = "dimina_mp_version_code"
+        private const val EXTRA_VERSION_NAME = "dimina_mp_version_name"
+        private const val EXTRA_UPDATE_MANIFEST_URL = "dimina_mp_update_manifest_url"
+        private const val EXTRA_SCENE = "dimina_mp_scene"
+        private const val EXTRA_OPENER_APP_ID = "dimina_mp_opener_app_id"
+        private const val EXTRA_REFERRER_EXTRA_DATA = "dimina_mp_referrer_extra_data"
+        private const val EXTRA_ENV_VERSION = "dimina_mp_env_version"
+
         private val activityRegistry = MiniProgramActivityRegistry<DiminaActivity>()
 
         /** 小程序前后台判据的唯一真相源，见 [DiminaActivity.onStart]/[DiminaActivity.onStop]。 */
@@ -2582,13 +2792,45 @@ class DiminaActivity : ComponentActivity() {
         }
 
         private fun getMiniProgramFromIntent(intent: Intent): MiniProgram? {
-            intent.setExtrasClassLoader(MiniProgram::class.java.classLoader)
-            return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                intent.getParcelableExtra(MINI_PROGRAM_KEY, MiniProgram::class.java)
-            } else {
-                @Suppress("DEPRECATION")
-                intent.getParcelableExtra(MINI_PROGRAM_KEY) as? MiniProgram
+            // 首选字段化 extras(当前 launch 的写入方式);字符串/整数不受混淆影响。
+            val appId = intent.getStringExtra(EXTRA_APP_ID)
+            if (!appId.isNullOrBlank()) {
+                return MiniProgram(
+                    appId = appId,
+                    name = intent.getStringExtra(EXTRA_NAME) ?: "",
+                    root = intent.getBooleanExtra(EXTRA_ROOT, true),
+                    path = intent.getStringExtra(EXTRA_PATH),
+                    versionCode = intent.getIntExtra(EXTRA_VERSION_CODE, 0),
+                    versionName = intent.getStringExtra(EXTRA_VERSION_NAME) ?: "",
+                    updateManifestUrl = intent.getStringExtra(EXTRA_UPDATE_MANIFEST_URL) ?: "",
+                    scene = intent.getIntExtra(EXTRA_SCENE, 1001),
+                    openerAppId = intent.getStringExtra(EXTRA_OPENER_APP_ID),
+                    referrerExtraData = intent.getStringExtra(EXTRA_REFERRER_EXTRA_DATA),
+                    envVersion = intent.getStringExtra(EXTRA_ENV_VERSION) ?: "release",
+                )
             }
+            // 兼容通道:宿主直接构造 Parcelable extra 的旧用法。Bundle 惰性解包下
+            // 陈旧 parcel(上一代构建的混淆类名)可能在此抛 BadParcelableException
+            // ——绝不能炸出 onCreate 带走整个宿主进程,捕获后走 null→finish。
+            intent.setExtrasClassLoader(MiniProgram::class.java.classLoader)
+            return try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableExtra(MINI_PROGRAM_KEY, MiniProgram::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableExtra(MINI_PROGRAM_KEY) as? MiniProgram
+                }
+            } catch (error: Exception) {
+                discardUnreadableIntent("stale parcel: ${error.message}", intent)
+                null
+            }
+        }
+
+        private fun discardUnreadableIntent(reason: String, intent: Intent) {
+            LogUtils.e(
+                "DiminaActivity",
+                "Discarding mini program intent ($reason): data=${intent.data}, extras=${intent.extras?.keySet()}",
+            )
         }
 
         /** Move the entire task to the front; CLEAR_TOP would discard the retained page stack. */
@@ -2608,10 +2850,23 @@ class DiminaActivity : ComponentActivity() {
                     if (intent.component?.className == DiminaActivity::class.java.name &&
                         !isObsoleteHostLaunch(intent)) {
                         MiniProgramTaskIdentity.appId(intent, hostSession, hostGeneration)
-                            ?: runCatching { getMiniProgramFromIntent(intent)?.appId }.getOrNull()
+                        // 只读字段化 extra:baseIntent 可能来自恢复的任务记录,
+                        // extras 会被系统剥掉;这里静默读,别走 parcel 兼容分支。
+                            ?: intent.getStringExtra(EXTRA_APP_ID)
                     } else null
                 },
             ) ?: return false
+            if (activity == null) {
+                // 根 Activity 已死、只剩任务记录:恢复它只会让系统用被剥掉 extras
+                // 的 baseIntent 重建 Activity,读不出 MiniProgram,表现为「打开即
+                // 闪退」。把记录连根删掉,让调用方走全新 launch(带完整 extras)。
+                try {
+                    task.finishAndRemoveTask()
+                } catch (error: Exception) {
+                    LogUtils.e("DiminaActivity", "Failed to drop dead task for $appId: ${error.message}")
+                }
+                return false
+            }
             task.moveToFront()
             return true
         }
@@ -2677,7 +2932,20 @@ class DiminaActivity : ComponentActivity() {
                 if (miniProgram.root) {
                     MiniProgramTaskIdentity.attach(this, miniProgram.appId, hostSession, hostGeneration)
                 }
-                putExtra(MINI_PROGRAM_KEY, miniProgram)
+                // 字段化 extras,不传 Parcelable 对象:Bundle 惰性解包 + 任务记录缓存
+                // 会让 parcel 跨构建版本存活,混淆类名一换就是 BadParcelableException
+                // 炸掉 onCreate(真机「打开即闪退」根因)。字符串/整数无此问题。
+                putExtra(EXTRA_APP_ID, miniProgram.appId)
+                putExtra(EXTRA_NAME, miniProgram.name)
+                putExtra(EXTRA_ROOT, miniProgram.root)
+                putExtra(EXTRA_PATH, miniProgram.path)
+                putExtra(EXTRA_VERSION_CODE, miniProgram.versionCode)
+                putExtra(EXTRA_VERSION_NAME, miniProgram.versionName)
+                putExtra(EXTRA_UPDATE_MANIFEST_URL, miniProgram.updateManifestUrl)
+                putExtra(EXTRA_SCENE, miniProgram.scene)
+                putExtra(EXTRA_OPENER_APP_ID, miniProgram.openerAppId)
+                putExtra(EXTRA_REFERRER_EXTRA_DATA, miniProgram.referrerExtraData)
+                putExtra(EXTRA_ENV_VERSION, miniProgram.envVersion)
                 putExtra(HOST_GENERATION_KEY, hostGeneration)
                 putExtra(HOST_SESSION_KEY, hostSession)
                 flag?.let {
@@ -2695,6 +2963,17 @@ class DiminaActivity : ComponentActivity() {
         internal fun closeMiniProgramFromHost(appId: String): Boolean {
             val activity = activityRegistry.lastRegistered(appId) ?: return false
             activity.exitMiniProgram()
+            return true
+        }
+
+        /**
+         * 框架升级确认弹窗的宿主入口:新包就绪时由 MiniApp 在主线程调用,路由到该
+         * 小程序当前最上层 Activity 展示「发现新版本」弹窗。
+         */
+        @androidx.annotation.MainThread
+        internal fun promptPendingUpdateFromHost(appId: String, versionCode: Int, versionName: String): Boolean {
+            val activity = activityRegistry.lastRegistered(appId) ?: return false
+            activity.promptPendingUpdate(versionCode, versionName)
             return true
         }
 
