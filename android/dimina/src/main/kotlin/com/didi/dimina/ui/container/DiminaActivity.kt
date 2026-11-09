@@ -35,11 +35,13 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.isSystemInDarkTheme
+import android.graphics.BitmapFactory
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -97,6 +99,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.toArgb
@@ -1933,6 +1936,7 @@ class DiminaActivity : ComponentActivity() {
                 appName = miniProgram.name.ifBlank {
                     navigationBarTitle.value.ifBlank { "小程序" }
                 },
+                iconPng = miniProgram.iconPng,
                 onReenterClick = {
                     showMiniProgramMenu.value = false
                     reenterMiniProgram()
@@ -2576,6 +2580,7 @@ class DiminaActivity : ComponentActivity() {
     @Composable
     private fun MiniProgramMenuSheet(
         appName: String,
+        iconPng: ByteArray?,
         onReenterClick: () -> Unit,
         onCloseClick: () -> Unit,
         onDismiss: () -> Unit
@@ -2594,6 +2599,10 @@ class DiminaActivity : ComponentActivity() {
         val sheetDividerTop = if (dark) Color(0xFF2A2D34) else Color(0xFFF2F2F2)
         val sheetDividerBottom = if (dark) Color(0xFF2A2D34) else Color(0xFFEDEDED)
         val sheetCancel = if (dark) Color(0xFF7D90B8) else Color(0xFF576B95)
+        // 头部图标:宿主传入的 PNG(桌面/市场同款字形)优先,无则回落首字母瓦片
+        val headerIcon = remember(iconPng) {
+            iconPng?.let { runCatching { BitmapFactory.decodeByteArray(it, 0, it.size) }.getOrNull() }
+        }
         val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
         ModalBottomSheet(
             onDismissRequest = onDismiss,
@@ -2616,12 +2625,21 @@ class DiminaActivity : ComponentActivity() {
                             .background(sheetIconBg),
                         contentAlignment = Alignment.Center
                     ) {
-                        Text(
-                            text = appName.take(1).ifBlank { "小" },
-                            fontSize = 18.sp,
-                            color = sheetAvatar,
-                            fontWeight = FontWeight.Medium
-                        )
+                        val header = headerIcon
+                        if (header != null) {
+                            Image(
+                                bitmap = header.asImageBitmap(),
+                                contentDescription = appName,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        } else {
+                            Text(
+                                text = appName.take(1).ifBlank { "小" },
+                                fontSize = 18.sp,
+                                color = sheetAvatar,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
                     }
                     Column(modifier = Modifier.padding(start = 14.dp)) {
                         Text(

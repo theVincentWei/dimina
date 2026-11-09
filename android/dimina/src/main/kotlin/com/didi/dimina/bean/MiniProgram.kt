@@ -21,6 +21,9 @@ data class MiniProgram(
     val referrerExtraData: String? = null,
     /** Bundled packages currently represent the release environment only. */
     val envVersion: String = "release",
+    /** 宿主渲染好的应用图标(桌面/市场同款字形的 PNG bytes);菜单弹层头部展示,
+     *  null=回落首字母瓦片。宿主侧随主题色离屏栅格化,SDK 不做字形复刻。 */
+    val iconPng: ByteArray? = null,
 ) : Parcelable {
 
     /** Keeps the original public seven-argument JVM constructor binary-compatible. */
@@ -58,6 +61,7 @@ data class MiniProgram(
         openerAppId = parcel.readString(),
         referrerExtraData = parcel.readString(),
         envVersion = parcel.readString() ?: "release",
+        iconPng = parcel.createByteArray(),
     )
 
     override fun writeToParcel(parcel: Parcel, flags: Int) {
@@ -72,6 +76,7 @@ data class MiniProgram(
         parcel.writeString(openerAppId)
         parcel.writeString(referrerExtraData)
         parcel.writeString(envVersion)
+        parcel.writeByteArray(iconPng)
     }
 
     // 描述内容，通常返回 0
