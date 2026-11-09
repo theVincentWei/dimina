@@ -52,6 +52,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -119,6 +120,7 @@ import com.didi.dimina.bean.PathInfo
 import com.didi.dimina.bean.TabBarConfig
 import com.didi.dimina.bean.TabBarItem
 import com.didi.dimina.common.BundledResourcePolicy
+import com.didi.dimina.common.CapsuleStyle
 import com.didi.dimina.common.LogUtils
 import com.didi.dimina.common.MenuButtonLayout
 import com.didi.dimina.common.PathUtils
@@ -1023,7 +1025,9 @@ class DiminaActivity : ComponentActivity() {
         WebSettingsCompat.setForceDark(
             target.settings,
             if (isDarkModeEnabled()) {
-                WebSettingsCompat.FORCE_DARK_ON
+                // AUTO=跟随 app uiMode(深色系统才反转内容,浅色系统保持原样);
+                // ON 是无条件反转,浅色系统下会把页面也染黑——不能用(实测踩过)。
+                WebSettingsCompat.FORCE_DARK_AUTO
             } else {
                 WebSettingsCompat.FORCE_DARK_OFF
             },
@@ -2145,12 +2149,52 @@ class DiminaActivity : ComponentActivity() {
                         statusBarHeight = currentWindowInfo.getInt("statusBarHeight"),
                     )
                 }
-                // 主题 tick:resume/宿主注入时重读配色(updateCapsuleTheme 生效)。
-                val capsuleBg = remember(capsuleThemeTick.intValue) {
-                    Color(Dimina.getInstance().getCapsuleBackgroundColor())
+                // 胶囊垂直锚点与 CenterAlignedTopAppBar 的 windowInsets 同源:systemBars ∪
+                // displayCutout 的顶缘(compose 精确值;M3 内部即
+                // systemBarsForVisualComponents.only(Horizontal+Top))。M3 标题内容区高
+                // NAVIGATION_BAR_CONTENT_HEIGHT_DP(64dp),胶囊 HEIGHT_DP(32dp)垂直居中
+                // → 上缘再 +16dp,胶囊中线即标题中线。旧实现经 Utils.getMiniProgramSystemInfo
+                // 的 px→dp 往返(roundToInt,兜底还可能落到 status_bar_height 资源值)是
+                // 独立第二通道,四舍五入与 fallback 相对标题栏产生垂直漂移(用户反馈的
+                // 「胶囊偏下」);这里改成同源锚点后不再有第二通道。
+                val topBarInsetTop = ComposeWindowInsets.systemBars
+                    .union(ComposeWindowInsets.displayCutout)
+                    .asPaddingValues()
+                    .calculateTopPadding()
+                val capsuleTopPadding = topBarInsetTop +
+                    ((MenuButtonLayout.NAVIGATION_BAR_CONTENT_HEIGHT_DP - MenuButtonLayout.HEIGHT_DP) / 2).dp
+
+                // 微信语义配色:底=导航栏解析色半透明 scrim(透出导航栏,随页面
+                // navigationBarBackgroundColor 变化);图标=navigationBarTextStyle
+                // (black→深色,white→浅色,与标题同源,深浅色切换实时刷新)。
+                // 宿主显式配置过 Builder.setCapsuleBackgroundColor/setCapsuleIconColor
+                // 时优先用宿主颜色(可自带 alpha,微信默认语义停用)。remember 把
+                // compose 色值纳入 key:@ 变量解析/深浅色切换即时生效;tick 保留
+                // resume 后重读宿主配置的语义。
+                val capsuleBg = remember(
+                    capsuleThemeTick.intValue,
+                    navBarBgColor,
+                    navigationBarTextColor.value,
+                ) {
+                    Color(
+                        CapsuleStyle.backgroundColor(
+                            navBarColor = navBarBgColor.toArgb(),
+                            explicit = Dimina.getInstance().takeIf { it.hasExplicitCapsuleColors() }
+                                ?.getCapsuleBackgroundColor(),
+                        )
+                    )
                 }
-                val capsuleFg = remember(capsuleThemeTick.intValue) {
-                    Color(Dimina.getInstance().getCapsuleIconColor())
+                val capsuleFg = remember(
+                    capsuleThemeTick.intValue,
+                    navigationBarTextColor.value,
+                ) {
+                    Color(
+                        CapsuleStyle.iconColor(
+                            textStyleWhite = navigationBarTextColor.value == Color.White,
+                            explicit = Dimina.getInstance().takeIf { it.hasExplicitCapsuleColors() }
+                                ?.getCapsuleIconColor(),
+                        )
+                    )
                 }
                 // 收起后 6s 空闲自动展开(契约式隐藏)。
                 LaunchedEffect(capsuleCollapsed.value) {
@@ -2164,7 +2208,7 @@ class DiminaActivity : ComponentActivity() {
                     Box(
                         modifier = Modifier
                             .align(Alignment.TopEnd)
-                            .padding(top = menuRect.top.dp)
+                            .padding(top = capsuleTopPadding)
                             .zIndex(10f)
                             .size(width = 18.dp, height = 40.dp)
                             .clip(
@@ -2201,7 +2245,7 @@ class DiminaActivity : ComponentActivity() {
                         modifier = Modifier
                             .align(Alignment.TopEnd)
                             .padding(
-                                top = menuRect.top.dp,
+                                top = capsuleTopPadding,
                                 end = (windowInfo.getInt("windowWidth") - menuRect.right).dp
                             )
                             .zIndex(10f)
@@ -2667,8 +2711,10 @@ class DiminaActivity : ComponentActivity() {
         onCloseClick: () -> Unit,
         modifier: Modifier = Modifier
     ) {
-        val borderColor = Color(0xFFE5E5E5)
-        val separatorColor = Color(0xFFE9E9E9)
+        // 描边/中缝随图标色派生(微信观感:深图标≈浅灰 hairline,白图标≈半透明白),
+        // 半透明底上不固定灰——固定灰在深色导航栏上不可见。
+        val borderColor = Color(CapsuleStyle.borderColor(iconColor.toArgb()))
+        val separatorColor = Color(CapsuleStyle.separatorColor(iconColor.toArgb()))
         val shape = RoundedCornerShape((MenuButtonLayout.HEIGHT_DP / 2).dp)
 
         Box(
