@@ -107,6 +107,8 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.webkit.WebSettingsCompat
+import androidx.webkit.WebViewFeature
 import com.didi.dimina.Dimina
 import com.didi.dimina.api.device.ScanCodeOptions
 import com.didi.dimina.bean.AppConfig
@@ -926,6 +928,10 @@ class DiminaActivity : ComponentActivity() {
 
         // Update status bar style based on text style
         updateActionColorStyle(resolveThemeValue(rawTextStyle))
+
+        // WebView 内容色算法(ForceDark)随主题刷新:所有已创建的页面 WebView 一并覆盖
+        (listOfNotNull(webView) + tabPageStates.values.mapNotNull { it.webView })
+            .forEach(::applyWebViewColorScheme)
     }
 
     /** tabBar 五色(color/selectedColor/backgroundColor/borderStyle)按当前主题解析;未开 darkmode 原样返回。 */
@@ -958,7 +964,11 @@ class DiminaActivity : ComponentActivity() {
      */
     private fun pushSystemInfoPatchToJsCore() {
         val patch = JSONObject().apply {
-            put("systemInfo", Utils.getMiniProgramSystemInfo(this@DiminaActivity))
+            val systemInfo = Utils.getMiniProgramSystemInfo(this@DiminaActivity)
+            // Utils 构建器保持平台通用、不含 theme;这里按门禁补上,否则基础库
+            // if (!theme) return,wx.onThemeChange 永远不触发。
+            currentJsTheme()?.let { systemInfo.put("theme", it) }
+            put("systemInfo", systemInfo)
         }
         miniApp.peekJsCore(miniProgram.appId)?.postMessage("hostEnvUpdate", patch)
     }
@@ -997,6 +1007,27 @@ class DiminaActivity : ComponentActivity() {
                 webView.setBackgroundColor(backgroundColor)
             }
         }
+    }
+
+    /**
+     * WebView 内容深浅色。宿主 targetSdk=28,WebView 对 targetSdk<33 的应用
+     * prefers-color-scheme 恒报 light(算法化适配 API 不可用),只能走 legacy
+     * ForceDark。语义:声明 darkmode 的小程序页面内容算法反转,深色下可读;
+     * 未声明永远 OFF(纯浅色,与现状一致)。FORCE_DARK 不支持时静默跳过。
+     */
+    @Suppress("DEPRECATION")
+    private fun applyWebViewColorScheme(target: WebView) {
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.FORCE_DARK)) {
+            return
+        }
+        WebSettingsCompat.setForceDark(
+            target.settings,
+            if (isDarkModeEnabled()) {
+                WebSettingsCompat.FORCE_DARK_ON
+            } else {
+                WebSettingsCompat.FORCE_DARK_OFF
+            },
+        )
     }
 
     private fun isLightColor(color: Color): Boolean {
@@ -1515,6 +1546,7 @@ class DiminaActivity : ComponentActivity() {
         if (useTabBarContainer.value) {
             val state = tabPageStates[selectedTabIndex.intValue]
             return state?.webView?.let {
+                applyWebViewColorScheme(it)
                 action(it)
                 true
             } ?: run {
@@ -1528,6 +1560,7 @@ class DiminaActivity : ComponentActivity() {
             }
         }
         return webView?.let {
+            applyWebViewColorScheme(it)
             action(it)
             true
         } ?: run {
@@ -1556,6 +1589,7 @@ class DiminaActivity : ComponentActivity() {
         }
         this.webView = webView
         webView.setBackgroundColor(parseCssColor(backgroundColor.value).toArgb())
+        applyWebViewColorScheme(webView)
         bindNativeComponentHost()
         LogUtils.d(tag, "WebView is now initialized and ready")
 
@@ -1585,6 +1619,7 @@ class DiminaActivity : ComponentActivity() {
         val state = tabPageStates[index] ?: return
         state.webView = webView
         webView.setBackgroundColor(parseCssColor(resolveThemeValue(state.configInfo.backgroundColor)).toArgb())
+        applyWebViewColorScheme(webView)
         if (index == selectedTabIndex.intValue) {
             this.webView = webView
         }

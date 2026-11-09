@@ -1,5 +1,6 @@
 package com.didi.dimina.ui.container
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -183,6 +184,53 @@ class DiminaActivityThemeWiringTest {
         assertTrue(
             "DiminaTabBar must receive the resolved config, not the raw one",
             source.contains("resolvedTabBarConfig?.takeIf { shouldShowTabBar }"),
+        )
+    }
+
+    @Test
+    fun `systemInfo patch carries the current theme so onThemeChange can fire`() {
+        val body = bodyOf("pushSystemInfoPatchToJsCore")
+        assertTrue(
+            "the patch builder must inject currentJsTheme - Utils.getMiniProgramSystemInfo has no theme, " +
+                "and the base library drops theme-less patches (if (!theme) return)",
+            body.contains("""currentJsTheme()?.let { systemInfo.put("theme", it) }"""),
+        )
+    }
+
+    @Test
+    fun `webview force dark is gated on darkmode with feature check`() {
+        val body = bodyOf("applyWebViewColorScheme")
+        assertTrue(
+            "force dark must be feature-checked - unsupported WebView versions must stay untouched",
+            body.contains("WebViewFeature.isFeatureSupported(WebViewFeature.FORCE_DARK)"),
+        )
+        assertTrue(
+            "force dark must only turn ON for packages that declared darkmode",
+            body.contains("if (isDarkModeEnabled())") &&
+                body.contains("WebSettingsCompat.FORCE_DARK_ON") &&
+                body.contains("WebSettingsCompat.FORCE_DARK_OFF"),
+        )
+    }
+
+    @Test
+    fun `webview force dark is applied at entry, creation and theme ticks`() {
+        val withWebViewBody = bodyOf("withWebView")
+        assertEquals(
+            "both withWebView immediate branches must apply the scheme before the action",
+            2,
+            Regex("applyWebViewColorScheme\\(it\\)").findAll(withWebViewBody).count(),
+        )
+        assertTrue(
+            "reapplyThemeStyles must re-cover every created webview (main + all tab pages)",
+            bodyOf("reapplyThemeStyles").contains("forEach(::applyWebViewColorScheme)"),
+        )
+        assertTrue(
+            "the main webview creation point must set the scheme before first paint",
+            bodyOf("onWebViewReady").contains("applyWebViewColorScheme(webView)"),
+        )
+        assertTrue(
+            "the tab webview creation point must set the scheme before first paint",
+            bodyOf("onTabWebViewReady").contains("applyWebViewColorScheme(webView)"),
         )
     }
 }
