@@ -265,6 +265,9 @@ class Dimina private constructor(context: Context) {
     /** 当前胶囊主题是否深色(菜单等面板配色跟它走)。 */
     fun isCapsuleThemeDark(): Boolean = capsuleDarkOverride ?: false
 
+    /** 宿主注入的深浅覆写原值;null=宿主未注入,菜单等面板配色退回系统深浅色。 */
+    fun capsuleDarkOverride(): Boolean? = capsuleDarkOverride
+
     @ColorInt
     internal fun getCapsuleBackgroundColor(): Int = config.capsuleBackgroundColor
 
