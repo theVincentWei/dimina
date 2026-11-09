@@ -57,6 +57,9 @@ class Dimina private constructor(context: Context) {
         val showCapsule: Boolean = builder.showCapsule
         @ColorInt val capsuleBackgroundColor: Int = builder.capsuleBackgroundColor
         @ColorInt val capsuleIconColor: Int = builder.capsuleIconColor
+
+        /** 宿主是否显式设置过胶囊颜色;false=容器按微信语义自适应(CapsuleStyle)。 */
+        val capsuleColorsExplicit: Boolean = builder.capsuleColorsExplicit
         val enableMultiTask: Boolean = builder.enableMultiTask
         val showLaunchLoading: Boolean = builder.showLaunchLoading
         val debugMode: Boolean = builder.debugMode
@@ -73,13 +76,20 @@ class Dimina private constructor(context: Context) {
             var showCapsule: Boolean = true
             fun setShowCapsule(show: Boolean): Builder { showCapsule = show; return this }
 
+            // 宿主显式配置过任一胶囊颜色 → 容器停用微信默认语义(半透明 scrim + 图标随
+            // navigationBarTextStyle),改为完全使用宿主给定的颜色(可自带 alpha)。
+            internal var capsuleColorsExplicit: Boolean = false
+                private set
+
             @ColorInt
             internal var capsuleBackgroundColor: Int = Color.WHITE
                 private set
 
-            /** Sets the capsule fill to an ARGB color. Configure before [Dimina.init]. */
+            /** Sets the capsule fill to an ARGB color. Configure before [Dimina.init].
+             *  显式配置后胶囊底色固定用该值(微信默认语义停用)。 */
             fun setCapsuleBackgroundColor(@ColorInt color: Int): Builder {
                 capsuleBackgroundColor = color
+                capsuleColorsExplicit = true
                 return this
             }
 
@@ -87,9 +97,11 @@ class Dimina private constructor(context: Context) {
             internal var capsuleIconColor: Int = 0xFF1F1F1F.toInt()
                 private set
 
-            /** Sets both capsule icons to an ARGB color. Configure before [Dimina.init]. */
+            /** Sets both capsule icons to an ARGB color. Configure before [Dimina.init].
+             *  显式配置后图标色固定用该值(不再随 navigationBarTextStyle 自适应)。 */
             fun setCapsuleIconColor(@ColorInt color: Int): Builder {
                 capsuleIconColor = color
+                capsuleColorsExplicit = true
                 return this
             }
 
@@ -237,28 +249,30 @@ class Dimina private constructor(context: Context) {
 
     fun shouldShowCapsule(): Boolean = config.showCapsule
 
-    // 宿主主题感知(dsh-go 容器按亮度注入):运行时可覆写的胶囊配色,null=用 init 配置。
+    // 系统深浅色标记:仅驱动菜单等面板配色(isCapsuleThemeDark)。胶囊本体的配色已改
+    // 微信语义(半透明 scrim 透出导航栏 + 图标随 navigationBarTextStyle,见 CapsuleStyle),
+    // 随容器主题重组自动适应,不再吃运行时实底覆写。
     private var capsuleDarkOverride: Boolean? = null
-    private var capsuleBgOverride: Int? = null
-    private var capsuleIconOverride: Int? = null
 
-    /** 运行时更新胶囊主题(深色=深底白图标,浅色=白底深图标);下一次重组生效。
-     *  颜色必须显式存:不能在 false 分支回落 config——config 里的颜色是 init 时
-     *  按当时的亮度定死的,回落会让「切浅色」永远切不出去。 */
+    /** 运行时标记胶囊主题深浅(菜单等面板配色跟它走)。胶囊本体配色不再由该方法决定:
+     *  默认=导航栏解析色半透明 scrim + 图标随 navigationBarTextStyle 自适应(微信语义,
+     *  对所有小程序一致,与是否声明 darkmode 无关);仅当宿主通过 Builder 显式配置过
+     *  setCapsuleBackgroundColor/setCapsuleIconColor 时才使用宿主颜色。 */
     fun updateCapsuleTheme(dark: Boolean) {
         capsuleDarkOverride = dark
-        capsuleBgOverride = if (dark) 0xFF2A2D34.toInt() else android.graphics.Color.WHITE
-        capsuleIconOverride = if (dark) 0xFFFFFFFF.toInt() else 0xFF1F1F1F.toInt()
     }
 
     /** 当前胶囊主题是否深色(菜单等面板配色跟它走)。 */
     fun isCapsuleThemeDark(): Boolean = capsuleDarkOverride ?: false
 
     @ColorInt
-    internal fun getCapsuleBackgroundColor(): Int = capsuleBgOverride ?: config.capsuleBackgroundColor
+    internal fun getCapsuleBackgroundColor(): Int = config.capsuleBackgroundColor
 
     @ColorInt
-    internal fun getCapsuleIconColor(): Int = capsuleIconOverride ?: config.capsuleIconColor
+    internal fun getCapsuleIconColor(): Int = config.capsuleIconColor
+
+    /** 宿主是否显式配置过胶囊颜色;false=走微信默认语义(CapsuleStyle)。 */
+    internal fun hasExplicitCapsuleColors(): Boolean = config.capsuleColorsExplicit
 
     /** Queries installed disk contents, not whether a runtime is currently alive. */
     fun isExistsApp(appId: String): Boolean = getAppVersionInfo(appId) != null
