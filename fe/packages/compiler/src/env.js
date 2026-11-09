@@ -64,6 +64,10 @@ const MINI_PROGRAM_RUNTIME_TYPE = 'miniProgram'
 const MINI_GAME_RUNTIME_TYPE = 'game'
 const MINI_GAME_ENTRY_PATH = 'game'
 
+// 微信 DarkMode 语义的 themeLocation 缺省值(相对小程序项目根)
+// https://developers.weixin.qq.com/miniprogram/dev/framework/ability/darkmode.html
+const DEFAULT_THEME_LOCATION = 'theme.json'
+
 // 保留扩展名：所有内置类型 + 逻辑(.js/.ts) + 配置(.json)。自定义项不得占用，
 // 否则会跨角色串编（如 template:['js'] 会把页面逻辑文件当成模板解析）。
 const RESERVED_EXTS = new Set([
@@ -677,6 +681,22 @@ function getAppConfigInfo() {
 	return configInfo.appInfo
 }
 
+/**
+ * 解析 darkmode 声明包的主题变量表路径。
+ * 仅当 app.json 声明 "darkmode": true 时返回绝对路径(themeLocation 相对
+ * 项目根,缺省 theme.json);未声明或声明非 true 时返回 null(未适配语义)。
+ */
+function getThemeLocationPath() {
+	const app = configInfo.appInfo
+	if (!app || app.darkmode !== true) {
+		return null
+	}
+	const themeLocation = typeof app.themeLocation === 'string' && app.themeLocation.trim() !== ''
+		? app.themeLocation.trim()
+		: DEFAULT_THEME_LOCATION
+	return path.resolve(pathInfo.workPath, themeLocation)
+}
+
 function getWorkPath() {
 	return pathInfo.workPath
 }
@@ -829,6 +849,12 @@ function createInitialDependencyGraph() {
 		}
 	}
 	addExistingModuleFiles(graph, 'app')
+	// darkmode 主题变量表纳入 app 节点依赖,让 watch/增量构建感知 theme.json 变化
+	const themeLocationPath = getThemeLocationPath()
+	if (themeLocationPath && fs.existsSync(themeLocationPath)) {
+		graph.addFile('app', themeLocationPath, 'config')
+	}
+
 	for (const item of getAppConfigInfo().tabBar?.list || []) {
 		for (const field of ['iconPath', 'selectedIconPath']) {
 			if (!item[field]) continue
@@ -923,6 +949,7 @@ export {
 	getTargetPath,
 	getTemplateDirectivePrefixes,
 	getTemplateExts,
+	getThemeLocationPath,
 	getViewScriptExts,
 	getViewScriptTags,
 	getWorkPath,

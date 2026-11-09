@@ -1,0 +1,27 @@
+{
+	"pages": [
+		"pages/index/index"
+	],
+	"darkmode": true,
+	"themeLocation": "theme.json",
+	"window": {
+		"navigationBarTitleText": "深色模式演示",
+		"navigationBarBackgroundColor": "@navBgColor",
+		"navigationBarTextStyle": "@navTxtStyle",
+		"backgroundColor": "@bgColor",
+		"backgroundTextStyle": "@bgTxtStyle",
+		"backgroundColorTop": "@bgTopColor"
+	},
+	"tabBar": {
+		"color": "@tabColor",
+		"selectedColor": "@tabSelectedColor",
+		"backgroundColor": "@tabBgColor",
+		"borderStyle": "@tabBorderStyle",
+		"list": [
+			{
+				"pagePath": "pages/index/index",
+				"text": "首页"
+			}
+		]
+	}
+}
