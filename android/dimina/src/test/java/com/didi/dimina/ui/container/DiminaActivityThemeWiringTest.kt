@@ -205,9 +205,10 @@ class DiminaActivityThemeWiringTest {
             body.contains("WebViewFeature.isFeatureSupported(WebViewFeature.FORCE_DARK)"),
         )
         assertTrue(
-            "force dark must only turn ON for packages that declared darkmode",
+            "declaring packages follow app uiMode (AUTO), undeclared stay light (OFF) - " +
+                "FORCE_DARK_ON would invert unconditionally even in light mode",
             body.contains("if (isDarkModeEnabled())") &&
-                body.contains("WebSettingsCompat.FORCE_DARK_ON") &&
+                body.contains("WebSettingsCompat.FORCE_DARK_AUTO") &&
                 body.contains("WebSettingsCompat.FORCE_DARK_OFF"),
         )
     }
