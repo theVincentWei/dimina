@@ -127,6 +127,7 @@ import com.didi.dimina.core.MiniApp
 import com.didi.dimina.core.PageStateTeardown
 import com.didi.dimina.core.RemoteUpdateManager
 import com.didi.dimina.ui.theme.DiminaAndroidTheme
+import com.didi.dimina.ui.theme.ThemeResolver
 import com.didi.dimina.ui.view.ActionSheet
 import com.didi.dimina.ui.view.ContactPicker
 import com.didi.dimina.ui.view.DiminaTabBar
@@ -174,6 +175,12 @@ class DiminaActivity : ComponentActivity() {
     private val homeButtonForcedByConfig = mutableStateOf(false)
     private val useTabBarContainer = mutableStateOf(false)
     private val loadedTabIndices = mutableStateOf<Set<Int>>(emptySet())
+
+    // 深色模式:壳层样式的原始配置值(可能带 "@key" 引用)。setInitialStyle 记录原始值,
+    // 主题切换时 reapplyThemeStyles 按新主题重新解析这组值;null 表示尚未应用过页面样式。
+    private var rawNavigationBarBackgroundColor: String? = null
+    private var rawBackgroundColor: String? = null
+    private var rawNavigationBarTextStyle: String? = null
 
     // State for ActionSheet
     private val showActionSheet = mutableStateOf(false)
@@ -858,17 +865,58 @@ class DiminaActivity : ComponentActivity() {
         // Set navigation bar title
         navigationBarTitle.value = config.navigationBarTitleText
 
-        // Set navigation bar background color
-        navigationBarBackgroundColor.value = config.navigationBarBackgroundColor
+        // 记录原始配置值(可能带 "@key" 引用),再按当前主题解析应用;
+        // 主题切换时 onConfigurationChanged 会对同一组原始值重算。
+        rawNavigationBarBackgroundColor = config.navigationBarBackgroundColor
+        rawBackgroundColor = config.backgroundColor
+        rawNavigationBarTextStyle = config.navigationBarTextStyle
+        reapplyThemeStyles()
+    }
 
-        // Set page background color
-        backgroundColor.value = config.backgroundColor
+    /**
+     * darkmode 门禁:仅 app.json 声明 "darkmode": true 的小程序解析 "@key" 引用;
+     * 其余包所有配置值原样直通,行为与现状完全一致。
+     */
+    private fun isDarkModeEnabled(): Boolean {
+        return ::appConfig.isInitialized && appConfig.app.darkmode
+    }
 
-        updateSystemNavigationBarColor(config.backgroundColor)
-        updateWebViewBackgroundColor(config.backgroundColor)
+    /** 按当前系统主题解析一个壳层配置值(未声明 darkmode 时原样返回)。 */
+    private fun resolveThemeValue(value: String): String {
+        if (!isDarkModeEnabled()) {
+            return value
+        }
+        return ThemeResolver.resolve(ThemeResolver.currentTheme(this), appConfig.app.theme, value)
+    }
+
+    /**
+     * 按当前主题重新解析壳层颜色并应用到全部应用点。
+     * setInitialStyle(进入/切换页面)与 onConfigurationChanged(系统深浅色变化)共用:
+     * 导航栏与页面背景是 Compose state,reset 即触发重组;系统导航栏与 WebView 背景
+     * 没有重组机制,这里手动重调。
+     */
+    private fun reapplyThemeStyles() {
+        val rawNavBg = rawNavigationBarBackgroundColor ?: return
+        val rawPageBg = rawBackgroundColor ?: return
+        val rawTextStyle = rawNavigationBarTextStyle ?: return
+
+        navigationBarBackgroundColor.value = resolveThemeValue(rawNavBg)
+        backgroundColor.value = resolveThemeValue(rawPageBg)
+
+        updateSystemNavigationBarColor(backgroundColor.value)
+        updateWebViewBackgroundColor(backgroundColor.value)
+
+        // 多 tab 场景:后台 tab 的 WebView/组件宿主也按各自页面配置刷新,切回时不残留旧色
+        if (useTabBarContainer.value) {
+            tabPageStates.values.forEach { state ->
+                val argb = parseCssColor(resolveThemeValue(state.configInfo.backgroundColor)).toArgb()
+                state.webView?.setBackgroundColor(argb)
+                state.nativeComponentHost?.updatePageBackgroundColor(argb)
+            }
+        }
 
         // Update status bar style based on text style
-        this.updateActionColorStyle(config.navigationBarTextStyle)
+        updateActionColorStyle(resolveThemeValue(rawTextStyle))
     }
 
     private fun parseCssColor(value: String, fallback: Color = Color.White): Color {
@@ -1492,7 +1540,7 @@ class DiminaActivity : ComponentActivity() {
         }
         val state = tabPageStates[index] ?: return
         state.webView = webView
-        webView.setBackgroundColor(parseCssColor(state.configInfo.backgroundColor).toArgb())
+        webView.setBackgroundColor(parseCssColor(resolveThemeValue(state.configInfo.backgroundColor)).toArgb())
         if (index == selectedTabIndex.intValue) {
             this.webView = webView
         }
@@ -1576,7 +1624,7 @@ class DiminaActivity : ComponentActivity() {
         val overlay = state.nativeOverlay ?: return
         state.nativeComponentHost = NativeComponentHost(this, currentWebView, overlay) { message ->
             bridgeForWebView(currentWebView)?.handleEmbeddedWebViewMessage(message)
-        }.also { it.updatePageBackgroundColor(parseCssColor(state.configInfo.backgroundColor).toArgb()) }
+        }.also { it.updatePageBackgroundColor(parseCssColor(resolveThemeValue(state.configInfo.backgroundColor)).toArgb()) }
         if (index == selectedTabIndex.intValue) {
             nativeComponentHost = state.nativeComponentHost
         }
@@ -1710,6 +1758,11 @@ class DiminaActivity : ComponentActivity() {
             android.content.res.Configuration.UI_MODE_NIGHT_YES
         Dimina.getInstance().updateCapsuleTheme(dark)
         capsuleThemeTick.intValue++
+        // 壳层颜色(导航栏背景/页面背景/系统导航栏/WebView 背景/状态栏字色)按新主题重算:
+        // 此时 resources.configuration 已是新值,resolveThemeValue 取到的即新主题。
+        if (rawNavigationBarBackgroundColor != null) {
+            reapplyThemeStyles()
+        }
     }
 
     override fun onResume() {

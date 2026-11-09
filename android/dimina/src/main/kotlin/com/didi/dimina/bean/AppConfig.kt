@@ -20,7 +20,16 @@ data class App(
     val tabBar: TabBarConfig? = null,
     val subPackages: List<SubPackage>? = null,
     val networkTimeout: NetworkTimeout? = null,
-    val debug: Boolean? = null
+    val debug: Boolean? = null,
+    /**
+     * 微信语义深色模式：app.json 声明 "darkmode": true 且编译器把 theme.json 变量表打进
+     * app.theme 后，壳层配置（window/tabBar 及页面级 window 段）的 "@key" 引用才按当前
+     * 系统主题解析。默认 false，旧包与未适配包完全走现状路径。
+     * 编译器契约：darkmode 为 true 时必有 theme；theme.json 缺失/损坏时编译器会丢弃
+     * darkmode，容器不处理「true 但无表」的半配置状态。
+     */
+    val darkmode: Boolean = false,
+    val theme: Map<String, Map<String, String>>? = null
 )
 
 @Serializable
