@@ -9,5 +9,6 @@
 			<text class="label">验证点</text>
 			<text class="desc">切换系统深浅色:导航栏/TabBar 走 theme.json @变量,本段文案走 @media (prefers-color-scheme) 查询,onThemeChange 输出到控制台</text>
 		</view>
+		<navigator class="detail-link" url="/pages/detail/detail">进入详情页(页面级 @引用) »</navigator>
 	</view>
 </view>

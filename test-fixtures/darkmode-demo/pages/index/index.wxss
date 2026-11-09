@@ -39,6 +39,17 @@
 	color: #444444;
 }
 
+.detail-link {
+	display: block;
+	margin-top: 40rpx;
+	padding: 20rpx 0;
+	text-align: center;
+	border-radius: 12rpx;
+	background-color: #e8f3ff;
+	color: #1f6fd6;
+	font-size: 28rpx;
+}
+
 /* 页面内容层深浅色切换:与壳层 theme.json 变量独立,由 WebView 原生媒体查询驱动 */
 @media (prefers-color-scheme: dark) {
 	.page {
@@ -55,5 +66,10 @@
 
 	.desc {
 		color: #b3b3b3;
+	}
+
+	.detail-link {
+		background-color: #1a3557;
+		color: #7cb0f5;
 	}
 }
