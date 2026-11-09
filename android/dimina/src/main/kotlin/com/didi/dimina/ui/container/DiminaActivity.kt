@@ -182,6 +182,13 @@ class DiminaActivity : ComponentActivity() {
     private var rawBackgroundColor: String? = null
     private var rawNavigationBarTextStyle: String? = null
 
+    // 主题 tick:声明 darkmode 的小程序在系统深浅色变化时自增,tabBar 五色等
+    // 派生主题值的重组以它为 key 重算。
+    private val themeTick = mutableIntStateOf(0)
+    // 已推给 JS 快照的主题;主题「真切换」才推 patch(wx.onThemeChange 只在变化时触发,
+    // 其它类配置变化不触发)。
+    private var lastPushedJsTheme: String? = null
+
     // State for ActionSheet
     private val showActionSheet = mutableStateOf(false)
     private val showMiniProgramMenu = mutableStateOf(false)
@@ -871,6 +878,8 @@ class DiminaActivity : ComponentActivity() {
         rawBackgroundColor = config.backgroundColor
         rawNavigationBarTextStyle = config.navigationBarTextStyle
         reapplyThemeStyles()
+        // 页面身份变化时 JS 侧看到的 systemInfo 快照也会随之刷新,推主题的必要性重新记账
+        lastPushedJsTheme = currentJsTheme()
     }
 
     /**
@@ -917,6 +926,41 @@ class DiminaActivity : ComponentActivity() {
 
         // Update status bar style based on text style
         updateActionColorStyle(resolveThemeValue(rawTextStyle))
+    }
+
+    /** tabBar 五色(color/selectedColor/backgroundColor/borderStyle)按当前主题解析;未开 darkmode 原样返回。 */
+    private fun resolveTabBarColors(config: TabBarConfig): TabBarConfig {
+        if (!isDarkModeEnabled()) {
+            return config
+        }
+        return config.copy(
+            color = resolveThemeValue(config.color),
+            selectedColor = resolveThemeValue(config.selectedColor),
+            backgroundColor = resolveThemeValue(config.backgroundColor),
+            borderStyle = resolveThemeValue(config.borderStyle),
+        )
+    }
+
+    /**
+     * JS 侧的 theme 值:仅声明 darkmode 的小程序返回 "dark"/"light"
+     * (微信语义:未适配包 systemInfo 不带 theme,永远按浅色)。
+     * 供 SystemApi 构建 systemInfo 时取用。
+     */
+    fun currentJsTheme(): String? {
+        return if (isDarkModeEnabled()) ThemeResolver.currentTheme(this) else null
+    }
+
+    /**
+     * 把带当前主题的全量 systemInfo patch 推给该 appId 的 JsCore:基础库侧
+     * hostEnvUpdate 消息合并进 hostEnv 快照,onThemeChange 按 patch.systemInfo?.theme
+     * 消费。推全量而非单字段,避免快照合并把其余字段丢掉;JsCore 未就绪时
+     * ?. 静默(同 postUpdateStatus 写法)。
+     */
+    private fun pushSystemInfoPatchToJsCore() {
+        val patch = JSONObject().apply {
+            put("systemInfo", Utils.getMiniProgramSystemInfo(this@DiminaActivity))
+        }
+        miniApp.peekJsCore(miniProgram.appId)?.postMessage("hostEnvUpdate", patch)
     }
 
     private fun parseCssColor(value: String, fallback: Color = Color.White): Color {
@@ -1763,6 +1807,15 @@ class DiminaActivity : ComponentActivity() {
         if (rawNavigationBarBackgroundColor != null) {
             reapplyThemeStyles()
         }
+        // theme→JS:仅声明 darkmode 的小程序在主题「真切换」时推 systemInfo patch,
+        // 触发 wx.onThemeChange;未声明 darkmode 完全不推(微信语义:未适配=永远浅色)。
+        if (isDarkModeEnabled()) {
+            themeTick.intValue++
+            if (isMiniProgramInitialized && ThemeResolver.currentTheme(this) != lastPushedJsTheme) {
+                lastPushedJsTheme = ThemeResolver.currentTheme(this)
+                pushSystemInfoPatchToJsCore()
+            }
+        }
     }
 
     override fun onResume() {
@@ -1877,6 +1930,10 @@ class DiminaActivity : ComponentActivity() {
             tabBarConfig != null &&
             tabBarVisible.value &&
             getTabBarIndex(currentPagePath.value) >= 0
+        // tabBar 五色按当前主题解析;themeTick 在系统深浅色变化时自增,remember 据此重算
+        val resolvedTabBarConfig = remember(tabBarConfig, themeTick.intValue) {
+            tabBarConfig?.let { resolveTabBarColors(it) }
+        }
         val statusBarHeight = ComposeWindowInsets.statusBars.asPaddingValues().calculateTopPadding()
 
         Box(modifier = modifier.fillMaxSize()) {
@@ -2010,7 +2067,7 @@ class DiminaActivity : ComponentActivity() {
                         }
                     }
 
-                    tabBarConfig?.takeIf { shouldShowTabBar }?.let { visibleTabBarConfig ->
+                    resolvedTabBarConfig?.takeIf { shouldShowTabBar }?.let { visibleTabBarConfig ->
                         DiminaTabBar(
                             tabBarConfig = visibleTabBarConfig,
                             selectedIndex = selectedTabIndex.intValue,
