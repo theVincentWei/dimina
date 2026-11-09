@@ -1,0 +1,75 @@
+.detail {
+	min-height: 100vh;
+	padding: 48rpx 32rpx;
+	box-sizing: border-box;
+	background-color: #f0f7ff;
+}
+
+.card {
+	padding: 40rpx;
+	border-radius: 16rpx;
+	background-color: #ffffff;
+}
+
+.title {
+	font-size: 40rpx;
+	font-weight: 600;
+	color: #0f2547;
+}
+
+.row {
+	margin-top: 24rpx;
+}
+
+.label {
+	display: block;
+	font-size: 24rpx;
+	color: #7a94b8;
+}
+
+.value {
+	font-size: 34rpx;
+	font-weight: 600;
+	color: #1f6fd6;
+}
+
+.desc {
+	font-size: 26rpx;
+	line-height: 1.6;
+	color: #33475e;
+}
+
+.back-link {
+	display: block;
+	margin-top: 40rpx;
+	padding: 20rpx 0;
+	text-align: center;
+	border-radius: 12rpx;
+	background-color: #e8f3ff;
+	color: #1f6fd6;
+	font-size: 28rpx;
+}
+
+/* 页面内容层深浅色切换:蓝调深色,与首页灰调区分 */
+@media (prefers-color-scheme: dark) {
+	.detail {
+		background-color: #0d1a2b;
+	}
+
+	.card {
+		background-color: #12233d;
+	}
+
+	.title {
+		color: #e3edff;
+	}
+
+	.desc {
+		color: #9db4d4;
+	}
+
+	.back-link {
+		background-color: #1a3557;
+		color: #7cb0f5;
+	}
+}

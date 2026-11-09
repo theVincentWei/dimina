@@ -127,6 +127,7 @@ import com.didi.dimina.core.MiniApp
 import com.didi.dimina.core.PageStateTeardown
 import com.didi.dimina.core.RemoteUpdateManager
 import com.didi.dimina.ui.theme.DiminaAndroidTheme
+import com.didi.dimina.ui.theme.ThemeResolver
 import com.didi.dimina.ui.view.ActionSheet
 import com.didi.dimina.ui.view.ContactPicker
 import com.didi.dimina.ui.view.DiminaTabBar
@@ -174,6 +175,19 @@ class DiminaActivity : ComponentActivity() {
     private val homeButtonForcedByConfig = mutableStateOf(false)
     private val useTabBarContainer = mutableStateOf(false)
     private val loadedTabIndices = mutableStateOf<Set<Int>>(emptySet())
+
+    // 深色模式:壳层样式的原始配置值(可能带 "@key" 引用)。setInitialStyle 记录原始值,
+    // 主题切换时 reapplyThemeStyles 按新主题重新解析这组值;null 表示尚未应用过页面样式。
+    private var rawNavigationBarBackgroundColor: String? = null
+    private var rawBackgroundColor: String? = null
+    private var rawNavigationBarTextStyle: String? = null
+
+    // 主题 tick:声明 darkmode 的小程序在系统深浅色变化时自增,tabBar 五色等
+    // 派生主题值的重组以它为 key 重算。
+    private val themeTick = mutableIntStateOf(0)
+    // 已推给 JS 快照的主题;主题「真切换」才推 patch(wx.onThemeChange 只在变化时触发,
+    // 其它类配置变化不触发)。
+    private var lastPushedJsTheme: String? = null
 
     // State for ActionSheet
     private val showActionSheet = mutableStateOf(false)
@@ -858,17 +872,95 @@ class DiminaActivity : ComponentActivity() {
         // Set navigation bar title
         navigationBarTitle.value = config.navigationBarTitleText
 
-        // Set navigation bar background color
-        navigationBarBackgroundColor.value = config.navigationBarBackgroundColor
+        // 记录原始配置值(可能带 "@key" 引用),再按当前主题解析应用;
+        // 主题切换时 onConfigurationChanged 会对同一组原始值重算。
+        rawNavigationBarBackgroundColor = config.navigationBarBackgroundColor
+        rawBackgroundColor = config.backgroundColor
+        rawNavigationBarTextStyle = config.navigationBarTextStyle
+        reapplyThemeStyles()
+        // 页面身份变化时 JS 侧看到的 systemInfo 快照也会随之刷新,推主题的必要性重新记账
+        lastPushedJsTheme = currentJsTheme()
+    }
 
-        // Set page background color
-        backgroundColor.value = config.backgroundColor
+    /**
+     * darkmode 门禁:仅 app.json 声明 "darkmode": true 的小程序解析 "@key" 引用;
+     * 其余包所有配置值原样直通,行为与现状完全一致。
+     */
+    private fun isDarkModeEnabled(): Boolean {
+        return ::appConfig.isInitialized && appConfig.app.darkmode
+    }
 
-        updateSystemNavigationBarColor(config.backgroundColor)
-        updateWebViewBackgroundColor(config.backgroundColor)
+    /** 按当前系统主题解析一个壳层配置值(未声明 darkmode 时原样返回)。 */
+    private fun resolveThemeValue(value: String): String {
+        if (!isDarkModeEnabled()) {
+            return value
+        }
+        return ThemeResolver.resolve(ThemeResolver.currentTheme(this), appConfig.app.theme, value)
+    }
+
+    /**
+     * 按当前主题重新解析壳层颜色并应用到全部应用点。
+     * setInitialStyle(进入/切换页面)与 onConfigurationChanged(系统深浅色变化)共用:
+     * 导航栏与页面背景是 Compose state,reset 即触发重组;系统导航栏与 WebView 背景
+     * 没有重组机制,这里手动重调。
+     */
+    private fun reapplyThemeStyles() {
+        val rawNavBg = rawNavigationBarBackgroundColor ?: return
+        val rawPageBg = rawBackgroundColor ?: return
+        val rawTextStyle = rawNavigationBarTextStyle ?: return
+
+        navigationBarBackgroundColor.value = resolveThemeValue(rawNavBg)
+        backgroundColor.value = resolveThemeValue(rawPageBg)
+
+        updateSystemNavigationBarColor(backgroundColor.value)
+        updateWebViewBackgroundColor(backgroundColor.value)
+
+        // 多 tab 场景:后台 tab 的 WebView/组件宿主也按各自页面配置刷新,切回时不残留旧色
+        if (useTabBarContainer.value) {
+            tabPageStates.values.forEach { state ->
+                val argb = parseCssColor(resolveThemeValue(state.configInfo.backgroundColor)).toArgb()
+                state.webView?.setBackgroundColor(argb)
+                state.nativeComponentHost?.updatePageBackgroundColor(argb)
+            }
+        }
 
         // Update status bar style based on text style
-        this.updateActionColorStyle(config.navigationBarTextStyle)
+        updateActionColorStyle(resolveThemeValue(rawTextStyle))
+    }
+
+    /** tabBar 五色(color/selectedColor/backgroundColor/borderStyle)按当前主题解析;未开 darkmode 原样返回。 */
+    private fun resolveTabBarColors(config: TabBarConfig): TabBarConfig {
+        if (!isDarkModeEnabled()) {
+            return config
+        }
+        return config.copy(
+            color = resolveThemeValue(config.color),
+            selectedColor = resolveThemeValue(config.selectedColor),
+            backgroundColor = resolveThemeValue(config.backgroundColor),
+            borderStyle = resolveThemeValue(config.borderStyle),
+        )
+    }
+
+    /**
+     * JS 侧的 theme 值:仅声明 darkmode 的小程序返回 "dark"/"light"
+     * (微信语义:未适配包 systemInfo 不带 theme,永远按浅色)。
+     * 供 SystemApi 构建 systemInfo 时取用。
+     */
+    fun currentJsTheme(): String? {
+        return if (isDarkModeEnabled()) ThemeResolver.currentTheme(this) else null
+    }
+
+    /**
+     * 把带当前主题的全量 systemInfo patch 推给该 appId 的 JsCore:基础库侧
+     * hostEnvUpdate 消息合并进 hostEnv 快照,onThemeChange 按 patch.systemInfo?.theme
+     * 消费。推全量而非单字段,避免快照合并把其余字段丢掉;JsCore 未就绪时
+     * ?. 静默(同 postUpdateStatus 写法)。
+     */
+    private fun pushSystemInfoPatchToJsCore() {
+        val patch = JSONObject().apply {
+            put("systemInfo", Utils.getMiniProgramSystemInfo(this@DiminaActivity))
+        }
+        miniApp.peekJsCore(miniProgram.appId)?.postMessage("hostEnvUpdate", patch)
     }
 
     private fun parseCssColor(value: String, fallback: Color = Color.White): Color {
@@ -1492,7 +1584,7 @@ class DiminaActivity : ComponentActivity() {
         }
         val state = tabPageStates[index] ?: return
         state.webView = webView
-        webView.setBackgroundColor(parseCssColor(state.configInfo.backgroundColor).toArgb())
+        webView.setBackgroundColor(parseCssColor(resolveThemeValue(state.configInfo.backgroundColor)).toArgb())
         if (index == selectedTabIndex.intValue) {
             this.webView = webView
         }
@@ -1576,7 +1668,7 @@ class DiminaActivity : ComponentActivity() {
         val overlay = state.nativeOverlay ?: return
         state.nativeComponentHost = NativeComponentHost(this, currentWebView, overlay) { message ->
             bridgeForWebView(currentWebView)?.handleEmbeddedWebViewMessage(message)
-        }.also { it.updatePageBackgroundColor(parseCssColor(state.configInfo.backgroundColor).toArgb()) }
+        }.also { it.updatePageBackgroundColor(parseCssColor(resolveThemeValue(state.configInfo.backgroundColor)).toArgb()) }
         if (index == selectedTabIndex.intValue) {
             nativeComponentHost = state.nativeComponentHost
         }
@@ -1710,6 +1802,20 @@ class DiminaActivity : ComponentActivity() {
             android.content.res.Configuration.UI_MODE_NIGHT_YES
         Dimina.getInstance().updateCapsuleTheme(dark)
         capsuleThemeTick.intValue++
+        // 壳层颜色(导航栏背景/页面背景/系统导航栏/WebView 背景/状态栏字色)按新主题重算:
+        // 此时 resources.configuration 已是新值,resolveThemeValue 取到的即新主题。
+        if (rawNavigationBarBackgroundColor != null) {
+            reapplyThemeStyles()
+        }
+        // theme→JS:仅声明 darkmode 的小程序在主题「真切换」时推 systemInfo patch,
+        // 触发 wx.onThemeChange;未声明 darkmode 完全不推(微信语义:未适配=永远浅色)。
+        if (isDarkModeEnabled()) {
+            themeTick.intValue++
+            if (isMiniProgramInitialized && ThemeResolver.currentTheme(this) != lastPushedJsTheme) {
+                lastPushedJsTheme = ThemeResolver.currentTheme(this)
+                pushSystemInfoPatchToJsCore()
+            }
+        }
     }
 
     override fun onResume() {
@@ -1824,6 +1930,10 @@ class DiminaActivity : ComponentActivity() {
             tabBarConfig != null &&
             tabBarVisible.value &&
             getTabBarIndex(currentPagePath.value) >= 0
+        // tabBar 五色按当前主题解析;themeTick 在系统深浅色变化时自增,remember 据此重算
+        val resolvedTabBarConfig = remember(tabBarConfig, themeTick.intValue) {
+            tabBarConfig?.let { resolveTabBarColors(it) }
+        }
         val statusBarHeight = ComposeWindowInsets.statusBars.asPaddingValues().calculateTopPadding()
 
         Box(modifier = modifier.fillMaxSize()) {
@@ -1957,7 +2067,7 @@ class DiminaActivity : ComponentActivity() {
                         }
                     }
 
-                    tabBarConfig?.takeIf { shouldShowTabBar }?.let { visibleTabBarConfig ->
+                    resolvedTabBarConfig?.takeIf { shouldShowTabBar }?.let { visibleTabBarConfig ->
                         DiminaTabBar(
                             tabBarConfig = visibleTabBarConfig,
                             selectedIndex = selectedTabIndex.intValue,

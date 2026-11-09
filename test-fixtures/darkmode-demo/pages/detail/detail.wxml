@@ -1,0 +1,14 @@
+<view class="detail">
+	<view class="card">
+		<text class="title">详情页(页面级 @引用)</text>
+		<view class="row">
+			<text class="label">当前主题</text>
+			<text class="value">{{theme || '未获取'}}</text>
+		</view>
+		<view class="row">
+			<text class="label">验证点</text>
+			<text class="desc">本页导航栏/窗口背景用页面级 @detailNavBg/@detailBg(蓝调),覆盖全局 window 的 @navBgColor/@bgColor(灰调);切主题时本页按自己的变量解析</text>
+		</view>
+		<navigator class="back-link" url="/pages/index/index" open-type="navigateBack">返回首页</navigator>
+	</view>
+</view>

@@ -1,0 +1,6 @@
+{
+	"navigationBarTitleText": "详情页",
+	"navigationBarBackgroundColor": "@detailNavBg",
+	"navigationBarTextStyle": "@navTxtStyle",
+	"backgroundColor": "@detailBg"
+}

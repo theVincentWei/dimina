@@ -1,0 +1,7 @@
+{
+	"compileType": "miniprogram",
+	"appid": "darkmode-demo",
+	"projectname": "darkmode-demo",
+	"libVersion": "3.3.3",
+	"description": "深色模式(darkmode/theme.json)编译与容器端到端验证用例"
+}

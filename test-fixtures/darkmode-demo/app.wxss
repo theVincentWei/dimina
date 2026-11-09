@@ -1,0 +1,10 @@
+/* 全局样式:页面内容层的深浅色由页面 wxss 的媒体查询驱动 */
+page {
+	background-color: #f7f7f7;
+}
+
+@media (prefers-color-scheme: dark) {
+	page {
+		background-color: #111111;
+	}
+}

@@ -122,7 +122,13 @@ class SystemApi : BaseApiHandler() {
     }
 
     private fun getSystemInfo(currentActivity: Activity): JSONObject {
-        return Utils.getMiniProgramSystemInfo(currentActivity)
+        return Utils.getMiniProgramSystemInfo(currentActivity).apply {
+            // 微信语义:声明 darkmode 的小程序 systemInfo 带 theme("dark"/"light"),
+            // 未适配包不带该字段。getWindowInfo 不走这里,保持窗口信息纯窗口语义。
+            if (currentActivity is DiminaActivity) {
+                currentActivity.currentJsTheme()?.let { put("theme", it) }
+            }
+        }
     }
 
     private fun getBluetoothStatus(activity: Activity): Boolean {
