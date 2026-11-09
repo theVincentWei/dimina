@@ -2,6 +2,7 @@ package com.didi.dimina.ui.view
 
 import android.content.res.Configuration
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -38,12 +39,25 @@ fun ActionSheet(
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true) // 跳过部分展开状态
     val scope = rememberCoroutineScope()
-    
+
+    // 深浅色:原生壳层 chrome,跟系统深浅色走(微信语义)。itemColor 显式自定义色
+    // 仍尊重原值;仅默认黑(#000000)在深色下换成浅色文字,否则深色面板上不可读。
+    val dark = isSystemInDarkTheme()
+    val sheetContainer = if (dark) Color(0xFF1D1F27) else Color.White
+    val sheetDivider = if (dark) Color(0xFF2A2D34) else Color(0xFFF0F0F0)
+    val sheetGapDivider = if (dark) Color(0xFF16181D) else Color(0xFFF7F7F7)
+    val sheetCancelColor = if (dark) Color(0xFFE8EAED) else Color.Black
+    val labelsColor = if (dark && buttonLabelsColor.uppercase() == "#000000") {
+        Color(0xFFE8EAED)
+    } else {
+        Color(buttonLabelsColor.toColorInt())
+    }
+
     ModalBottomSheet(
         onDismissRequest = { onDismiss() },
         sheetState = sheetState,
         shape = RoundedCornerShape(topStart = 16.dp),
-        containerColor = Color.White,
+        containerColor = sheetContainer,
         dragHandle = { },
     ) {
         Column(
@@ -68,7 +82,7 @@ fun ActionSheet(
                     Text(
                         text = label,
                         fontSize = 16.sp,
-                        color =  Color(buttonLabelsColor.toColorInt()),
+                        color = labelsColor,
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable {
@@ -84,18 +98,18 @@ fun ActionSheet(
 
                     // Add a divider after each button except the last one
                     if (index < buttonLabels.size - 1) {
-                        HorizontalDivider(color = Color(0xFFF0F0F0), thickness = 1.dp)
+                        HorizontalDivider(color = sheetDivider, thickness = 1.dp)
                     }
                 }
 
                 // Divider before the Cancel button
-                HorizontalDivider(color = Color(0xFFF7F7F7), thickness = 4.dp)
+                HorizontalDivider(color = sheetGapDivider, thickness = 4.dp)
 
                 // Cancel button
                 Text(
                     text = "取消",
                     fontSize = 16.sp,
-                    color = Color.Black,
+                    color = sheetCancelColor,
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable {

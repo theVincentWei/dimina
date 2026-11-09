@@ -7,6 +7,7 @@ import android.os.Looper
 import android.view.View
 import android.view.ViewGroup
 import androidx.compose.foundation.background
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -451,11 +452,20 @@ fun ModalContent(
 ) {
     BoxWithConstraints {
         val contentScrollState = rememberScrollState()
+        // 深浅色:原生壳层 chrome,跟系统深浅色走(微信语义)。取消/确认色显式自定义
+        // 仍尊重原值;仅默认色(黑取消/#576B95 确认)在深色下换浅色系,否则不可读。
+        val dark = isSystemInDarkTheme()
+        val modalBg = if (dark) Color(0xFF1D1F27) else Color.White
+        val modalTitle = if (dark) Color(0xFFE8EAED) else Color.Black
+        val modalContent = if (dark) Color(0xFF9AA1A9) else Color(0xFF7F7F7F)
+        val modalDivider = if (dark) Color(0xFF2A2D34) else Color.LightGray
+        val resolvedCancel = if (dark && cancelColor == Color.Black) Color(0xFFE8EAED) else cancelColor
+        val resolvedConfirm = if (dark && confirmColor == Color(0xFF576B95)) Color(0xFF7D90B8) else confirmColor
         Column(
             modifier = Modifier
                 .width(280.dp)
                 .heightIn(max = maxHeight * MODAL_MAX_HEIGHT_FRACTION)
-                .background(Color.White, RoundedCornerShape(8.dp))
+                .background(modalBg, RoundedCornerShape(8.dp))
                 .padding(top = 16.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
@@ -463,7 +473,7 @@ fun ModalContent(
             if (title.isNotEmpty()) {
                 Text(
                     text = title,
-                    color = Color.Black,
+                    color = modalTitle,
                     fontSize = 16.sp,
                     fontWeight = FontWeight.Bold,
                     textAlign = TextAlign.Center,
@@ -484,7 +494,7 @@ fun ModalContent(
                 ) {
                     Text(
                         text = content,
-                        color = Color(0xFF7F7F7F),
+                        color = modalContent,
                         fontSize = 16.sp,
                         textAlign = TextAlign.Center,
                         modifier = Modifier.fillMaxWidth()
@@ -496,7 +506,7 @@ fun ModalContent(
                 modifier = Modifier
                     .height(1.dp)
                     .fillMaxWidth(),
-                color = Color.LightGray
+                color = modalDivider
             )
 
             // Buttons
@@ -515,7 +525,7 @@ fun ModalContent(
                     ) {
                         Text(
                             text = cancelText.take(4),
-                            color = cancelColor,
+                            color = resolvedCancel,
                             fontSize = 16.sp
                         )
                     }
@@ -524,7 +534,7 @@ fun ModalContent(
                         modifier = Modifier
                             .width(1.dp)
                             .fillMaxHeight(),
-                        color = Color.LightGray
+                        color = modalDivider
                     )
                 }
 
@@ -536,7 +546,7 @@ fun ModalContent(
                 ) {
                     Text(
                         text = confirmText.take(4),
-                        color = confirmColor,
+                        color = resolvedConfirm,
                         fontSize = 16.sp
                     )
                 }
