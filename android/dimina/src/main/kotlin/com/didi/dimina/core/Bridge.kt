@@ -224,11 +224,18 @@ class Bridge(
         val body = msg.getJSONObject("body")
         val bridgeId = body.optString("bridgeId")
 
-        if (bridgeId.isNotEmpty() && bridgeId != id) {
+        // render→container 保留 bridgeId 校验（渲染层可能残留旧桥消息）。
+        // service→container 不校验：service 是单例上下文，为当前栈顶页面服务，其
+        // API 消息携带的 id 来自 fe service 路由器（redirectTo 换桥后与桥 id 不同源，
+        // 真机实证 2026-11-11：双拼教练结果页所有 API invoke 被此处静默丢弃导致
+        // 按钮/跳转全失效），且下游 transMsg 一律以本桥 id 重新键控，放行安全。
+        if (source != "service" && bridgeId.isNotEmpty() && bridgeId != id) {
+            LogUtils.d(tag, "[Container] DROP msg from $source (bridgeId mismatch): msg=$bridgeId mine=$id type=${msg.optString("type")}")
             return JSValue.createUndefined()
         }
         val incomingResourceLoadId = body.optString("resourceLoadId")
         if (incomingResourceLoadId.isNotEmpty() && incomingResourceLoadId != resourceLoadId) {
+            LogUtils.d(tag, "[Container] DROP msg from $source (resourceLoadId mismatch): msg=$incomingResourceLoadId mine=$resourceLoadId type=${msg.optString("type")}")
             return JSValue.createUndefined()
         }
 

@@ -441,7 +441,20 @@ class QuickJSEngine {
         if (msg.optString("type") != "canvasNodeSync") Log.d(tag, "Received invoke from JavaScript: ${msg.optString("type")}")
         val body = msg.getJSONObject("body")
         val id = body.optString("bridgeId")
-        return invokeCallbacks[id]?.invoke(msg)
+        val handler = invokeCallbacks[id]
+        if (handler == null) {
+            // 兜底分发：service 侧 invoke 携带的 id 与桥注册键不一致时（redirectTo 换桥
+            // 后 service 路由器顶部页 id 未跟上新桥），回落到最近注册的桥——service
+            // 当前栈顶页面必然挂在最新的桥上。真机实证：双拼教练结果页 redirectTo/
+            // switchTab invoke 全部被静默丢弃（2026-11-11）。
+            val fallback = invokeCallbacks.entries.lastOrNull()?.value
+            if (fallback != null && msg.optString("type") == "invokeAPI") {
+                Log.w(tag, "invokeFromJS: no handler for id=$id, fallback to latest bridge (registered=${invokeCallbacks.keys})")
+                return fallback.invoke(msg)
+            }
+            Log.w(tag, "invokeFromJS: NO invoke handler for id=$id (registered=${invokeCallbacks.keys})")
+        }
+        return handler?.invoke(msg)
     }
 
     @Suppress("unused")
