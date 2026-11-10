@@ -2952,26 +2952,47 @@ class DiminaActivity : ComponentActivity() {
                     state.homeButtonHidden.value = false
                 }
 
-                currentBridge.destroy(true)
-                // 更新当前 bridge 的配置
-                currentBridge.updateOptions(
-                    pathInfo = pathInfo,
-                    root = pageConfig?.root ?: "main",
-                    configInfo = mergedPageConfig
-                )
-                currentBridge.init(false)
+                // redirectTo 修复（2026-11-11）：旧实现 destroy(true)+init(false) 原位复用
+                // Bridge/WebView，跳过 addJavascriptInterface 重挂、jscore 回调重注册与
+                // canvasChannel 重建——reload 后 render→container 事件链静默死亡，新页面
+                // 所有 bindtap 永久失效（真机实证；navigateTo=新 Activity 全新桥、
+                // switchTab=独立桥完整 init 均正常）。改走与首次加载完全一致的已验证
+                // 路径：完整销毁旧桥 → createBridge/init(true) 重建全新桥（旧 WebView
+                // 复用，重挂注入接口幂等；新桥=新 bridgeId 无回调冲突）。
+                miniApp.removeBridge(miniProgram.appId, currentBridge)
+                currentBridge.destroy(false)
+
                 if (activeTabState != null && activeTabIndex >= 0) {
-                    withTabWebViewPageLoaded(activeTabIndex) {
-                        if (!activeTabState.bridgeStarted) {
-                            LogUtils.d(tag, "Tab page loaded, restarting bridge: index=$activeTabIndex")
-                            activeTabState.bridgeStarted = true
-                            currentBridge.start()
-                        }
-                    }
+                    // tab 容器：置空桥状态，走 onTabWebViewReady 既有重建路径
+                    // （bridge==null 即全量 createBridge，start 仍由 pageLoaded 门控）
+                    activeTabState.bridge = null
+                    activeTabState.webView?.let { onTabWebViewReady(activeTabIndex, it) }
                 } else {
-                    withWebViewPageLoaded {
-                        LogUtils.d(tag, "Page loaded, restarting bridge")
-                        currentBridge.start()
+                    // 非 tab 页：克隆旧桥 options（保留 isRoot/scene/referrerInfo 等语义，
+                    // 仅替换路径/根目录/页面配置），与 navigateTo 同款全量建桥
+                    withWebView { webView ->
+                        val freshBridge = createBridge(
+                            BridgeOptions(
+                                pathInfo = pathInfo,
+                                scene = currentBridge.options.scene,
+                                jscore = currentBridge.options.jscore,
+                                webview = webView,
+                                isRoot = currentBridge.options.isRoot,
+                                root = pageConfig?.root ?: "main",
+                                appId = currentBridge.options.appId,
+                                runtimeType = currentBridge.options.runtimeType,
+                                pages = currentBridge.options.pages,
+                                configInfo = mergedPageConfig,
+                                referrerInfo = currentBridge.options.referrerInfo,
+                            )
+                        )
+                        // Add bridge to MiniApp's bridge list for this appId
+                        miniApp.addBridge(miniProgram.appId, freshBridge)
+
+                        withWebViewPageLoaded {
+                            LogUtils.d(tag, "Page loaded, starting fresh bridge (redirectTo)")
+                            freshBridge.start()
+                        }
                     }
                 }
             }
