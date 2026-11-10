@@ -1,0 +1,13 @@
+import { invokeAPI } from '@/api/common'
+
+/**
+ * 订阅一次性模板消息。
+ *
+ * 框架只做 API 面：参数校验与桥接由容器/原生层完成，面板由宿主弹出。
+ * 成功回调形状与微信一致：{ errMsg: 'requestSubscribeMessage:ok', [tmplId]: 'accept' }，
+ * 值域 accept / reject / ban / filter。非用户点击态或宿主不可用时走 fail。
+ * https://developers.weixin.qq.com/miniprogram/dev/api/open-api/subscribe-message/wx.requestSubscribeMessage.html
+ */
+export function requestSubscribeMessage(opts) {
+	return invokeAPI('requestSubscribeMessage', opts)
+}

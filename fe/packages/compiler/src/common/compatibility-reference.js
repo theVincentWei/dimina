@@ -279,6 +279,7 @@ const supportedWxApis = [
 	"getSetting",
 	"openSetting",
 	"authorize",
+	"requestSubscribeMessage",
 	"chooseContact",
 	"addPhoneContact",
 	"setClipboardData",

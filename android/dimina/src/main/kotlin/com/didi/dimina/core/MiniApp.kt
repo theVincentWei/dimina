@@ -29,6 +29,7 @@ import com.didi.dimina.api.media.VideoToolApi
 import com.didi.dimina.api.media.VideoDecoderApi
 import com.didi.dimina.api.media.RecorderApi
 import com.didi.dimina.api.openapi.SettingApi
+import com.didi.dimina.api.openapi.SubscribeMessageApi
 import com.didi.dimina.api.network.LocalNetworkApi
 import com.didi.dimina.api.route.RouteApi
 import com.didi.dimina.api.storage.StorageApi
@@ -394,7 +395,8 @@ class MiniApp private constructor() {
         videoDecoderApi.registerWith(apiRegistry)
         audioApi.registerWith(apiRegistry)
         recorderApi.registerWith(apiRegistry)
-        SettingApi().registerWith(apiRegistry)
+        SettingApi(apiRegistry).registerWith(apiRegistry)
+        SubscribeMessageApi(apiRegistry).registerWith(apiRegistry)
 
         // route
         RouteApi().registerWith(apiRegistry)

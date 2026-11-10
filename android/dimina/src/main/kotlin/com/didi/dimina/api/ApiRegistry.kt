@@ -1,6 +1,7 @@
 package com.didi.dimina.api
 
 import com.didi.dimina.api.ext.ExtBridgeApi
+import com.didi.dimina.api.ext.ExtCallback
 import com.didi.dimina.api.ext.ExtModuleHandler
 import com.didi.dimina.common.ApiUtils
 import com.didi.dimina.common.LogUtils
@@ -40,6 +41,36 @@ class ApiRegistry {
     fun registerExtModule(moduleName: String, handler: ExtModuleHandler) {
         extModules[moduleName] = handler
         LogUtils.d(tag, "Registered ext module: $moduleName")
+    }
+
+    /**
+     * 供原生 API handler 主动回调宿主扩展模块（一次性调用）。
+     *
+     * extModules 本身是私有的，原生 API 需要「把用户交互/状态查询交给宿主」时走这里，
+     * 而不是另开一份模块表。语义与 extBridge 的一次性调用一致：handler 处理完调用
+     * [ExtCallback]，不改变 extBridge / extOnBridge 既有的注册与路由行为。
+     *
+     * @return 是否找到了该 module 的 handler。false 表示宿主未注册（调用方应按失败处理，
+     *         调用方不要依赖 callback 一定被触发）。
+     */
+    fun invokeExtModule(
+        module: String,
+        event: String,
+        data: JSONObject = JSONObject(),
+        callback: ExtCallback,
+    ): Boolean {
+        val handler = extModules[module]
+        if (handler == null) {
+            LogUtils.e(tag, "invokeExtModule: module \"$module\" not registered")
+            return false
+        }
+        return try {
+            handler.handle(event, data, callback)
+            true
+        } catch (e: Exception) {
+            LogUtils.e(tag, "invokeExtModule error ($module/$event): ${e.message}")
+            false
+        }
     }
 
     /**

@@ -1,0 +1,146 @@
+//
+//  SubscribeMessageAPI.swift
+//  dimina
+//
+//  一次性模板消息订阅（微信兼容 API 面）。
+//
+//  框架职责只到「参数校验 + 桥给宿主 + 把宿主结果映射回微信形状」：
+//  弹面板、记账、投递都不在这里，也不直接依赖任何宿主实现。
+//  宿主通过 `DMPAppManager.registerExtModule("dsh-notify", ...)` 注册处理器：
+//   - `showSubscribePanel(data={appId,tmplIds})` → success `{results:{tplId:'accept'|'reject'}}`
+//   - 非用户点击态 / 无宿主 → fail（微信语义）。
+//
+
+import Foundation
+
+public final class SubscribeMessageAPI: DMPContainerApi {
+    fileprivate static let REQUEST_SUBSCRIBE_MESSAGE = "requestSubscribeMessage"
+    fileprivate static let NOTIFY_MODULE = "dsh-notify"
+    fileprivate static let EVENT_SHOW_PANEL = "showSubscribePanel"
+    fileprivate static let MAX_TMPL_IDS_PER_REQUEST = 5
+    fileprivate static let validResults: Set<String> = ["accept", "reject", "ban", "filter"]
+
+    fileprivate static let FAIL_INVALID_TMPL_IDS = "requestSubscribeMessage:fail invalid tmplIds"
+    fileprivate static let FAIL_NOT_SUPPORTED = "requestSubscribeMessage:fail not supported"
+    fileprivate static let FAIL_INVALID_RESULT = "requestSubscribeMessage:fail invalid host result"
+    fileprivate static let FAIL_NON_TAP = "requestSubscribeMessage:fail can only be invoked by user TAP gesture"
+
+    @BridgeMethod(REQUEST_SUBSCRIBE_MESSAGE)
+    var requestSubscribeMessage: DMPBridgeMethodHandler = { param, env, callback in
+        guard let tmplIds = SubscribeMessageAPI.parseTmplIds(param.getMap()),
+              !tmplIds.isEmpty,
+              tmplIds.count <= SubscribeMessageAPI.MAX_TMPL_IDS_PER_REQUEST else {
+            DMPContainerApi.invokeFailure(
+                callback: callback,
+                param: DMPMap(["errMsg": SubscribeMessageAPI.FAIL_INVALID_TMPL_IDS]),
+                errMsg: SubscribeMessageAPI.FAIL_INVALID_TMPL_IDS,
+                completeCarriesResult: true
+            )
+            return DMPAsyncResult()
+        }
+
+        guard let app = DMPAppManager.sharedInstance().getApp(appIndex: env.appIndex),
+              let handler = app.container?.extModules[SubscribeMessageAPI.NOTIFY_MODULE] else {
+            DMPContainerApi.invokeFailure(
+                callback: callback,
+                param: DMPMap(["errMsg": SubscribeMessageAPI.FAIL_NOT_SUPPORTED]),
+                errMsg: SubscribeMessageAPI.FAIL_NOT_SUPPORTED,
+                completeCarriesResult: true
+            )
+            return DMPAsyncResult()
+        }
+
+        // 宿主可能同步或异步回调；保证终态只回一次。
+        let guardFlag = DMPSubscribeOnceGuard()
+        let data = DMPMap(["appId": env.appId, "tmplIds": tmplIds])
+        let extCallback = DMPExtCallback(
+            onSuccess: { result in
+                guard guardFlag.claim() else { return }
+                guard let payload = SubscribeMessageAPI.mapResults(tmplIds: tmplIds, result: result) else {
+                    DMPLogger.debug("showSubscribePanel returned an invalid result: \(result.toJsonString())")
+                    SubscribeMessageAPI.emitFailure(
+                        errMsg: SubscribeMessageAPI.FAIL_INVALID_RESULT,
+                        source: nil,
+                        callback: callback
+                    )
+                    return
+                }
+                DMPContainerApi.invokeSuccess(callback: callback, param: payload, completeCarriesResult: true)
+            },
+            onFail: { error in
+                guard guardFlag.claim() else { return }
+                SubscribeMessageAPI.emitFailure(
+                    errMsg: SubscribeMessageAPI.normalizeFailure(error),
+                    source: error,
+                    callback: callback
+                )
+            }
+        )
+        _ = handler(SubscribeMessageAPI.EVENT_SHOW_PANEL, data, extCallback)
+        return DMPAsyncResult()
+    }
+
+    /// tmplIds 必须是 string[]；非法形状返回 nil（与微信的参数错误语义一致）。
+    fileprivate static func parseTmplIds(_ map: DMPMap) -> [String]? {
+        guard let raw = map.get("tmplIds") as? [Any] else { return nil }
+        var tmplIds: [String] = []
+        for item in raw {
+            guard let id = item as? String, !id.isEmpty else { return nil }
+            tmplIds.append(id)
+        }
+        return tmplIds
+    }
+
+    /// 把宿主返回的 `{results:{tplId:'accept'|'reject'}}` 映射成微信形状
+    /// `{errMsg:'requestSubscribeMessage:ok', tplId:'accept'}`。
+    /// 宿主漏掉的模板按 `reject` 处理（绝不把缺失的同意当成 accept）；
+    /// 出现值域外的值则视为宿主契约被破坏，整次调用 fail。
+    fileprivate static func mapResults(tmplIds: [String], result: DMPMap) -> DMPMap? {
+        guard let results = result.get("results") as? [String: Any] else { return nil }
+        let payload = DMPMap(["errMsg": "\(REQUEST_SUBSCRIBE_MESSAGE):ok"])
+        for tmplId in tmplIds {
+            guard let decision = results[tmplId] as? String else {
+                DMPLogger.debug("host omitted consent for \(tmplId), treat as reject")
+                payload.set(tmplId, "reject")
+                continue
+            }
+            guard validResults.contains(decision) else { return nil }
+            payload.set(tmplId, decision)
+        }
+        return payload
+    }
+
+    fileprivate static func normalizeFailure(_ error: DMPMap) -> String {
+        let raw = error.getString(key: "errMsg") ?? ""
+        if raw.hasPrefix("\(REQUEST_SUBSCRIBE_MESSAGE):fail") { return raw }
+        if !raw.isEmpty { return "\(REQUEST_SUBSCRIBE_MESSAGE):fail \(raw)" }
+        return FAIL_NON_TAP
+    }
+
+    fileprivate static func emitFailure(errMsg: String, source: DMPMap?, callback: DMPBridgeCallback?) {
+        let result = DMPMap(["errMsg": errMsg])
+        if let errCode = source?.get("errCode") {
+            result.set("errCode", errCode)
+        }
+        DMPContainerApi.invokeFailure(
+            callback: callback,
+            param: result,
+            errMsg: errMsg,
+            completeCarriesResult: true
+        )
+    }
+}
+
+/// 宿主回调可能同步/异步到达，用一次性标记保证终态回调只发一次。
+private final class DMPSubscribeOnceGuard: @unchecked Sendable {
+    private let lock = NSLock()
+    private var resolved = false
+
+    func claim() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !resolved else { return false }
+        resolved = true
+        return true
+    }
+}

@@ -455,6 +455,7 @@ DMPApp.init(context, { virtualFilePrefix: 'host-file://' })
 | 开放接口 - 授权 | getSetting                     | ✓       | ✓   | ✓       | ✓   |
 |               | openSetting                      | ✓       | ✓   | ✓       | ✗   |
 |               | authorize                        | ✓       | ✓   | ✓       | ✓   |
+|               | requestSubscribeMessage          | ✓       | ✓   | ✗       | ✗   |
 | 设备 - 联系人 | chooseContact                    | ✓       | ✓   | ✓       | ✗   |
 |               | addPhoneContact                  | ✓       | ✓   | ✓       | ✗   |
 | 设备 - 剪贴板 | setClipboardData                 | ✓       | ✓   | ✓       | ✓   |
@@ -477,6 +478,8 @@ DMPApp.init(context, { virtualFilePrefix: 'host-file://' })
 补充说明：
 
 - 兼容性确认按完整链路验收：service 公开入口、目标平台注册与参数/返回契约、持续事件的多监听/注销语义、权限与资源销毁、文档行以及 compiler 兼容性基线必须一起核对。service 中存在入口不代表四个平台都已完成容器实现；反过来，表中暂时缺行也不代表 native 已有实现不存在。`scanCode` 就是一次“原生三端已实现、表格漏登记”的存量审计结果。
+- `requestSubscribeMessage`（一次性模板消息订阅）只提供微信兼容的 **API 面**：service 入口 + Android / iOS 容器的参数校验与结果映射（成功形状 `{errMsg:'requestSubscribeMessage:ok', [tmplId]: 'accept'|'reject'|'ban'|'filter'}`，单次最多 5 个模板 id；非用户点击态由宿主判定，返回 `fail`）。订阅面板、订阅记账与通知投递都不在 Dimina，宿主需注册 `dsh-notify` 扩展提供 `showSubscribePanel` / `getSubscribeState`；无宿主时该 API 明确返回 `fail`，不伪造订阅结果。
+- `getSetting` 响应新增 `subscriptionsSetting`：`{mainSwitch: bool, itemSettings: {[tmplId]: 'accept'|'reject'}}`，同样是**宿主依赖**能力（由 `dsh-notify` 扩展的 `getSubscribeState` 提供），`mainSwitch` 是用户级总开关、`itemSettings` 是模板级状态；宿主未注册或查询失败时回落默认值 `{mainSwitch: true, itemSettings: {}}`，不影响 `authSetting`。读取 `subscriptionsSetting` 不需要单独的 API 名，仍走 `getSetting`。
 - Web 的 `authorize` 当前支持浏览器可请求的相机、麦克风和定位 scope；浏览器无法打开系统应用权限页，因此 `openSetting` 明确不支持。Web 的 `chooseVideo` 返回会话期 `blob:` 临时路径；视频相册写入和编码压缩没有浏览器等价系统能力，`saveVideoToPhotosAlbum`、`compressVideo` 明确不支持。
 - `compressVideo` 的精细编码参数受平台编码器能力约束：Android 和 HarmonyOS 会请求目标码率/分辨率，iOS 依据 `quality`/`resolution` 选择系统导出预设；编码器可能降级参数，但不会用原文件复制冒充压缩结果。
 - `createVideoDecoder` 提供后台逐帧解码、同步 RGBA 取帧、异步控制和 `start` / `stop` / `seek` / `ended` 事件；编码格式受系统解码器限制，三端真机播放仍需验收；Web 需安全上下文、OffscreenCanvas 和 WebCodecs，并在 start 时检查 MP4 编码支持。`bufferchange` 和音轨暂不支持。接入与 libpag 的 Wasm 能力边界见[视频解码说明](./VideoDecoder.md)。
