@@ -22,10 +22,12 @@ import com.didi.dimina.api.device.PhoneApi
 import com.didi.dimina.api.device.ScanApi
 import com.didi.dimina.api.device.ScreenApi
 import com.didi.dimina.api.device.VibrateAPI
+import com.didi.dimina.api.media.AudioApi
 import com.didi.dimina.api.media.ImageApi
 import com.didi.dimina.api.media.VideoApi
 import com.didi.dimina.api.media.VideoToolApi
 import com.didi.dimina.api.media.VideoDecoderApi
+import com.didi.dimina.api.media.RecorderApi
 import com.didi.dimina.api.openapi.SettingApi
 import com.didi.dimina.api.network.LocalNetworkApi
 import com.didi.dimina.api.route.RouteApi
@@ -105,6 +107,8 @@ class MiniApp private constructor() {
     private val apiRegistry = ApiRegistry()
     private val bluetoothApi = BluetoothApi()
     private val videoDecoderApi = VideoDecoderApi()
+    private val audioApi = AudioApi()
+    private val recorderApi = RecorderApi()
     private val localNetworkApi = LocalNetworkApi()
     private val deviceNetworkApi = com.didi.dimina.api.device.NetworkApi()
     private val fileApi = FileApi()
@@ -388,6 +392,8 @@ class MiniApp private constructor() {
         VideoApi().registerWith(apiRegistry)
         VideoToolApi().registerWith(apiRegistry)
         videoDecoderApi.registerWith(apiRegistry)
+        audioApi.registerWith(apiRegistry)
+        recorderApi.registerWith(apiRegistry)
         SettingApi().registerWith(apiRegistry)
 
         // route
@@ -609,6 +615,8 @@ class MiniApp private constructor() {
         deviceNetworkApi.clearApp(appId)
         fileApi.clearApp(appId)
         videoDecoderApi.clearApp(appId)
+        audioApi.clearApp(appId)
+        recorderApi.clearApp(appId)
         // 正在后台写盘的 canvas 导出属于这一代 runtime；换代之后它的回调没有接收方，
         // 已经发布的文件也不会有人来取。
         com.didi.dimina.api.media.CanvasExportGeneration.invalidate(appId)
@@ -646,6 +654,8 @@ class MiniApp private constructor() {
         com.didi.dimina.api.network.WebSocketManager.shared.disposeAll()
         deviceNetworkApi.clearAll()
         fileApi.clearAll()
+        audioApi.clearAll()
+        recorderApi.clearAll()
 
         // Clear all Bridge lists
         bridgeListMap.clear()
@@ -659,6 +669,8 @@ class MiniApp private constructor() {
     fun destroy() {
         fileApi.clearAll()
         videoDecoderApi.clearAll()
+        audioApi.clearAll()
+        recorderApi.clearAll()
         // Clear API resources
         apiRegistry.clear()
     }
