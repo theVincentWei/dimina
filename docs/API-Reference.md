@@ -407,6 +407,51 @@ DMPApp.init(context, { virtualFilePrefix: 'host-file://' })
 |               | VideoDecoder.getFrameData        | ✓       | ✓   | ✓       | ✓   |
 |               | VideoDecoder.on                  | ✓       | ✓   | ✓       | ✓   |
 |               | VideoDecoder.off                 | ✓       | ✓   | ✓       | ✓   |
+| 媒体 - 音频   | createInnerAudioContext          | ✓       | ✗   | ✗       | ✗   |
+|               | InnerAudioContext.play           | ✓       | ✗   | ✗       | ✗   |
+|               | InnerAudioContext.pause          | ✓       | ✗   | ✗       | ✗   |
+|               | InnerAudioContext.stop           | ✓       | ✗   | ✗       | ✗   |
+|               | InnerAudioContext.seek           | ✓       | ✗   | ✗       | ✗   |
+|               | InnerAudioContext.destroy        | ✓       | ✗   | ✗       | ✗   |
+|               | InnerAudioContext.onCanplay      | ✓       | ✗   | ✗       | ✗   |
+|               | InnerAudioContext.offCanplay     | ✓       | ✗   | ✗       | ✗   |
+|               | InnerAudioContext.onPlay         | ✓       | ✗   | ✗       | ✗   |
+|               | InnerAudioContext.offPlay        | ✓       | ✗   | ✗       | ✗   |
+|               | InnerAudioContext.onPause        | ✓       | ✗   | ✗       | ✗   |
+|               | InnerAudioContext.offPause       | ✓       | ✗   | ✗       | ✗   |
+|               | InnerAudioContext.onStop         | ✓       | ✗   | ✗       | ✗   |
+|               | InnerAudioContext.offStop        | ✓       | ✗   | ✗       | ✗   |
+|               | InnerAudioContext.onEnded        | ✓       | ✗   | ✗       | ✗   |
+|               | InnerAudioContext.offEnded       | ✓       | ✗   | ✗       | ✗   |
+|               | InnerAudioContext.onTimeUpdate   | ✓       | ✗   | ✗       | ✗   |
+|               | InnerAudioContext.offTimeUpdate  | ✓       | ✗   | ✗       | ✗   |
+|               | InnerAudioContext.onError        | ✓       | ✗   | ✗       | ✗   |
+|               | InnerAudioContext.offError       | ✓       | ✗   | ✗       | ✗   |
+|               | InnerAudioContext.onWaiting      | ✓       | ✗   | ✗       | ✗   |
+|               | InnerAudioContext.offWaiting     | ✓       | ✗   | ✗       | ✗   |
+|               | InnerAudioContext.onSeeking      | ✓       | ✗   | ✗       | ✗   |
+|               | InnerAudioContext.offSeeking     | ✓       | ✗   | ✗       | ✗   |
+|               | InnerAudioContext.onSeeked       | ✓       | ✗   | ✗       | ✗   |
+|               | InnerAudioContext.offSeeked      | ✓       | ✗   | ✗       | ✗   |
+|               | InnerAudioContext.onLoadedmetadata | ✓     | ✗   | ✗       | ✗   |
+|               | InnerAudioContext.offLoadedmetadata | ✓    | ✗   | ✗       | ✗   |
+|               | getRecorderManager               | ✓       | ✗   | ✗       | ✗   |
+|               | RecorderManager.start            | ✓       | ✗   | ✗       | ✗   |
+|               | RecorderManager.pause            | ✓       | ✗   | ✗       | ✗   |
+|               | RecorderManager.resume           | ✓       | ✗   | ✗       | ✗   |
+|               | RecorderManager.stop             | ✓       | ✗   | ✗       | ✗   |
+|               | RecorderManager.onStart          | ✓       | ✗   | ✗       | ✗   |
+|               | RecorderManager.offStart         | ✓       | ✗   | ✗       | ✗   |
+|               | RecorderManager.onPause          | ✓       | ✗   | ✗       | ✗   |
+|               | RecorderManager.offPause         | ✓       | ✗   | ✗       | ✗   |
+|               | RecorderManager.onStop           | ✓       | ✗   | ✗       | ✗   |
+|               | RecorderManager.offStop          | ✓       | ✗   | ✗       | ✗   |
+|               | RecorderManager.onError          | ✓       | ✗   | ✗       | ✗   |
+|               | RecorderManager.offError         | ✓       | ✗   | ✗       | ✗   |
+|               | RecorderManager.onInterruptionBegin | ✓    | ✗   | ✗       | ✗   |
+|               | RecorderManager.offInterruptionBegin | ✓    | ✗   | ✗       | ✗   |
+|               | RecorderManager.onInterruptionEnd | ✓       | ✗   | ✗       | ✗   |
+|               | RecorderManager.offInterruptionEnd | ✓      | ✗   | ✗       | ✗   |
 | 开放接口 - 授权 | getSetting                     | ✓       | ✓   | ✓       | ✓   |
 |               | openSetting                      | ✓       | ✓   | ✓       | ✗   |
 |               | authorize                        | ✓       | ✓   | ✓       | ✓   |
@@ -435,6 +480,7 @@ DMPApp.init(context, { virtualFilePrefix: 'host-file://' })
 - Web 的 `authorize` 当前支持浏览器可请求的相机、麦克风和定位 scope；浏览器无法打开系统应用权限页，因此 `openSetting` 明确不支持。Web 的 `chooseVideo` 返回会话期 `blob:` 临时路径；视频相册写入和编码压缩没有浏览器等价系统能力，`saveVideoToPhotosAlbum`、`compressVideo` 明确不支持。
 - `compressVideo` 的精细编码参数受平台编码器能力约束：Android 和 HarmonyOS 会请求目标码率/分辨率，iOS 依据 `quality`/`resolution` 选择系统导出预设；编码器可能降级参数，但不会用原文件复制冒充压缩结果。
 - `createVideoDecoder` 提供后台逐帧解码、同步 RGBA 取帧、异步控制和 `start` / `stop` / `seek` / `ended` 事件；编码格式受系统解码器限制，三端真机播放仍需验收；Web 需安全上下文、OffscreenCanvas 和 WebCodecs，并在 start 时检查 MP4 编码支持。`bufferchange` 和音轨暂不支持。接入与 libpag 的 Wasm 能力边界见[视频解码说明](./VideoDecoder.md)。
+- 音频接口本轮 service 层已提供 `createInnerAudioContext` / `getRecorderManager` 入口，原生侧目前仅 Android 落地（`InnerAudio.*` / `Recorder.*` wire 通道），iOS / Harmony / Web 待后续轮接入；`RecorderManager` 仅支持 aac / wav 两种格式，`onFrameRecorded` 暂未接入。
 - 全局 `WXWebAssembly` 提供 libpag 4.5.85 所需的真实 Wasm 执行，包含同步 imports / exports、线性内存扩容、Table 取函数及包内 Brotli 加载；通过 `wx.canIUse('WXWebAssembly')` 检查。iOS 需要系统 JavaScriptCore 支持 ArrayBuffer 分离（iOS 17.4+）。它不属于 `wx` 对象上的方法，支持范围和接入方式见 [WXWebAssembly](./WXWebAssembly.md)。
 - `getUpdateManager` 只负责更新状态通知和重启入口，包下载、校验和动态下发流程请参考[小程序包更新说明](./MiniProgram-Update.md)。
 - `chooseMessageFile` 在 Android、iOS 和 HarmonyOS 上使用系统文件选择器。宿主无法访问微信会话记录，因此 `time` 返回文件修改时间（取不到时为选择时间），不是微信会话发送时间；选中文件会先复制到当前小程序的临时沙箱并返回 `difile://` 路径。

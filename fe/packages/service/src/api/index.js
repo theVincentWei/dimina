@@ -15,6 +15,35 @@ const blockedPublicApiNames = new Set([
 	'onUnhandledRejection',
 	'onPageNotFound',
 	'onAppRoute',
+	// 音频通道的内部 wire 名（InnerAudioContext / RecorderManager 的控制桥与事件桥）。
+	// native 注册表会出现这些名字，但微信公开 API 只有 createInnerAudioContext /
+	// getRecorderManager 两个入口，wire 名不能以非微信 API 形态挂到 wx 上。
+	'InnerAudio.setSrc',
+	'InnerAudio.play',
+	'InnerAudio.pause',
+	'InnerAudio.stop',
+	'InnerAudio.seek',
+	'InnerAudio.setProperty',
+	'InnerAudio.getState',
+	'InnerAudio.on',
+	'InnerAudio.off',
+	'InnerAudio.destroy',
+	'Recorder.start',
+	'Recorder.pause',
+	'Recorder.resume',
+	'Recorder.stop',
+	'Recorder.onStart',
+	'Recorder.onPause',
+	'Recorder.onStop',
+	'Recorder.onError',
+	'Recorder.onInterruptionBegin',
+	'Recorder.onInterruptionEnd',
+	'Recorder.offStart',
+	'Recorder.offPause',
+	'Recorder.offStop',
+	'Recorder.offError',
+	'Recorder.offInterruptionBegin',
+	'Recorder.offInterruptionEnd',
 ])
 for (const f of Object.values(apiInfo)) {
 	for (const [k, v] of Object.entries(f)) {
