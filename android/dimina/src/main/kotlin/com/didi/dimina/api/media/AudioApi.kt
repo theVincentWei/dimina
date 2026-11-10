@@ -109,6 +109,7 @@ class AudioApi : BaseApiHandler() {
         val mainHandler = Handler(Looper.getMainLooper())
         var player: MediaPlayer? = null
         var src = ""
+        var resolvedSrc: String? = null
         var autoplay = false
         var loop = false
         var volume = 1.0
@@ -349,7 +350,10 @@ class AudioApi : BaseApiHandler() {
                 if (destroyed || generation != prepareGeneration) return@post
                 val target = player ?: MediaPlayer().also { player = it }
                 resolved.fold(
-                    { source -> attachAndPrepare(target, source) },
+                    { source ->
+                        resolvedSrc = source
+                        attachAndPrepare(target, source)
+                    },
                     { failure ->
                         paused = true
                         emitError(
@@ -362,14 +366,19 @@ class AudioApi : BaseApiHandler() {
         }
     }
 
-    /** play-after-stop 的重 prepare：src 不变，直接走最后一次解析结果（无网络 IO）。 */
+    /** play-after-stop 的重 prepare：直接走最后一次解析结果（无网络 IO）。
+     *  平台特性：stop()/reset() 后复用同一 MediaPlayer 再 prepareAsync 会静默挂死
+     *  （onPrepared/onError 均不回调，API 35 实测）——必须销毁旧实例重建。 */
     private fun InnerAudioInstance.reprepare() {
         val generation = ++prepareGeneration
-        val source = src
+        val source = resolvedSrc
         mainHandler.post {
             if (destroyed || generation != prepareGeneration) return@post
-            val target = player ?: return@post
-            attachAndPrepare(target, source)
+            if (source.isNullOrEmpty()) return@post
+            player?.let { runCatching { it.release() } }
+            player = null
+            val fresh = MediaPlayer().also { player = it }
+            attachAndPrepare(fresh, source)
         }
     }
 
