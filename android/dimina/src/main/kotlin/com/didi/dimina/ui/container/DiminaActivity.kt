@@ -53,6 +53,7 @@ import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
@@ -66,7 +67,6 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -75,7 +75,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -99,6 +98,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -148,7 +149,6 @@ import com.didi.dimina.ui.view.VideoCaptureOptions
 import com.didi.dimina.ui.view.NativeComponentHost
 import com.didi.dimina.ui.view.ScanCodeLauncher
 import com.didi.dimina.ui.view.WebViewCacheManager
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -254,13 +254,6 @@ class DiminaActivity : ComponentActivity() {
     // Contact picker for handling contact-related operations
     private lateinit var contactPicker: ContactPicker
     private lateinit var scanCodeLauncher: ScanCodeLauncher
-
-    // ---- 框架升级确认弹窗:升级由框架(容器+宿主)全权负责,小程序侧不参与。 ----
-    // 非 null 时在内容之上渲染 material3「发现新版本」AlertDialog;用户决定经
-    // CompletableDeferred 交回挂起的调用方(冷启动 prepare 门 或 运行中的就绪提示)。
-    private data class PendingUpdatePrompt(val versionCode: Int, val versionName: String)
-    private val pendingUpdatePrompt = mutableStateOf<PendingUpdatePrompt?>(null)
-    private var pendingUpdateChoice: CompletableDeferred<Boolean>? = null
 
     private var imageChooseCallback: ((List<String>) -> Unit)? = null
     private var messageFileChooseCallback: ((Boolean, List<Uri>) -> Unit)? = null
@@ -615,28 +608,6 @@ class DiminaActivity : ComponentActivity() {
 
         setContent {
             DiminaAndroidTheme {
-                // 框架升级确认弹窗:新包就绪后问用户是否立即升级(升级由框架负责)。
-                pendingUpdatePrompt.value?.let { prompt ->
-                    AlertDialog(
-                        onDismissRequest = { resolvePendingUpdate(false) },
-                        title = { Text("发现新版本") },
-                        text = {
-                            Text(
-                                if (prompt.versionName.isBlank()) {
-                                    "新版本已准备好(v${prompt.versionCode}),是否立即升级?"
-                                } else {
-                                    "新版本 ${prompt.versionName} 已准备好,是否立即升级?"
-                                }
-                            )
-                        },
-                        confirmButton = {
-                            TextButton(onClick = { resolvePendingUpdate(true) }) { Text("立即升级") }
-                        },
-                        dismissButton = {
-                            TextButton(onClick = { resolvePendingUpdate(false) }) { Text("暂不升级") }
-                        },
-                    )
-                }
                 val pageBackgroundColor = parseCssColor(backgroundColor.value)
                 Scaffold(
                     modifier = Modifier.fillMaxSize(),
@@ -757,26 +728,17 @@ class DiminaActivity : ComponentActivity() {
                         appId, miniProgram.versionCode, miniProgram.versionName,
                     )
                 } else {
-                    // 框架升级确认:上次运行下载好的 pending 新包还在 → 本次启动前弹窗问
-                    // 用户;确认则先激活再继续(下面的配置读取直接拿到新包),拒绝则照旧
-                    // 跑当前版本。升级决策完全在框架侧,小程序不参与。
-                    // autoSync 包(miniProgram.autoUpdate)例外:跳过弹窗直接激活,
-                    // 确认语义由服务端 bundle.json 的 autoSync 字段表达。
+                    // Bundle 强制自动升级(契约 §6.4):上次运行检测/下载好的 pending 新包
+                    // 还在 → 本次启动前**静默激活**,不询问用户(autoUpdate 包的既有旁路
+                    // 由此全量化:弹窗与 declined 记账已删,所有包一致)。此时运行时/页面栈
+                    // 尚未建立,换包就是「下次打开自动生效」,不存在中途重启。激活成功即发
+                    // onUpdateApplied(带版本号)供宿主发告知通知;激活失败则照旧跑当前版本,
+                    // 保持静默(下载失败本来就走 no-update,不打扰)。
                     val pending = RemoteUpdateManager.peekPendingUpdate(applicationContext, appId)
                     if (pending != null && pending.versionCode > VersionUtils.getAppVersion(appId)) {
-                        if (miniProgram.autoUpdate) {
-                            if (RemoteUpdateManager.activatePendingUpdate(applicationContext, appId)) {
-                                miniProgram = miniProgram.copy(versionCode = pending.versionCode)
-                                MiniApp.getInstance().notifyUpdateApplied(appId, pending.versionCode, pending.versionName)
-                            }
-                        } else if (!miniApp.isUpdateDeclined(appId, pending.versionCode)) {
-                            val decision = askPendingUpdateDecision(pending.versionCode, pending.versionName)
-                            if (decision == true && RemoteUpdateManager.activatePendingUpdate(applicationContext, appId)) {
-                                miniProgram = miniProgram.copy(versionCode = pending.versionCode)
-                                MiniApp.getInstance().notifyUpdateApplied(appId, pending.versionCode, pending.versionName)
-                            } else if (decision == false) {
-                                miniApp.recordUpdateDeclined(appId, pending.versionCode)
-                            }
+                        if (RemoteUpdateManager.activatePendingUpdate(applicationContext, appId)) {
+                            miniProgram = miniProgram.copy(versionCode = pending.versionCode)
+                            MiniApp.getInstance().notifyUpdateApplied(appId, pending.versionCode, pending.versionName)
                         }
                     }
                 }
@@ -2210,6 +2172,25 @@ class DiminaActivity : ComponentActivity() {
                         )
                     )
                 }
+                // Header 右侧通知入口:宿主通过 Dimina.setNotifyEntry 打开,从未调用则不渲染。
+                // 它只是入口壳(不参与胶囊收起逻辑——收起态下仍常驻),点击回调给宿主;
+                // 配色跟随胶囊同一套 capsuleThemeTick / navigationBarTextStyle 机制。
+                val notifyEntryState = Dimina.getInstance().notifyEntryState()
+                if (notifyEntryState.visible) {
+                    MiniProgramNotifyEntry(
+                        iconColor = capsuleFg,
+                        unread = notifyEntryState.unread,
+                        onClick = { notifyEntryState.onEntryClick?.invoke() },
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(
+                                top = capsuleTopPadding,
+                                end = (windowInfo.getInt("windowWidth") - menuRect.right).dp +
+                                    MenuButtonLayout.WIDTH_DP.dp + NOTIFY_ENTRY_GAP_DP.dp
+                            )
+                            .zIndex(10f)
+                    )
+                }
                 // 收起后 6s 空闲自动展开(契约式隐藏)。
                 LaunchedEffect(capsuleCollapsed.value) {
                     if (capsuleCollapsed.value) {
@@ -2479,53 +2460,6 @@ class DiminaActivity : ComponentActivity() {
         activityRegistry.closeAll(miniProgram.appId) { it.finish() }
     }
 
-    // ---- 框架升级确认弹窗 ----
-
-    /**
-     * 挂起等待用户在「发现新版本」弹窗里的决定。返回 null = 弹窗没能展示
-     * (宿主已销毁或已有弹窗在等);true/false = 用户选了 升级/暂不。
-     * 主线程渲染,可在任意线程挂起调用。
-     */
-    private suspend fun askPendingUpdateDecision(versionCode: Int, versionName: String): Boolean? =
-        withContext(Dispatchers.Main) {
-            if (destroyedByHost || isFinishing || isDestroyed || pendingUpdateChoice != null) {
-                return@withContext null
-            }
-            val choice = CompletableDeferred<Boolean>()
-            pendingUpdateChoice = choice
-            pendingUpdatePrompt.value = PendingUpdatePrompt(versionCode, versionName)
-            try {
-                choice.await()
-            } finally {
-                if (pendingUpdateChoice === choice) {
-                    pendingUpdateChoice = null
-                    pendingUpdatePrompt.value = null
-                }
-            }
-        }
-
-    /** 弹窗按钮/系统返回的回调:关掉弹窗并把用户决定交回挂起的调用方。 */
-    private fun resolvePendingUpdate(confirmed: Boolean) {
-        pendingUpdatePrompt.value = null
-        pendingUpdateChoice?.complete(confirmed)
-        pendingUpdateChoice = null
-    }
-
-    /**
-     * 运行中新包就绪:弹窗问用户。确认 → [applyUpdate](激活+冷重启);
-     * 暂不 → 记录到本会话拒绝表(同一 pending 版本本次运行不再重复弹)。
-     */
-    internal fun promptPendingUpdate(versionCode: Int, versionName: String) {
-        CoroutineScope(Dispatchers.Main).launch {
-            val confirmed = askPendingUpdateDecision(versionCode, versionName)
-            if (confirmed == true) {
-                applyUpdate()
-            } else if (confirmed == false) {
-                miniApp.recordUpdateDeclined(miniProgram.appId, versionCode)
-            }
-        }
-    }
-
     private fun getDefaultEntryPagePath(): String? {
         if (!::appConfig.isInitialized) {
             return null
@@ -2748,6 +2682,84 @@ class DiminaActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Header 通知入口(铃铛) + 未读角标。
+     *
+     * 框架不认识「通知」语义:这只是宿主打开的入口壳,图标/角标颜色跟随胶囊主题
+     * ([capsuleFg] 由 capsuleThemeTick + navigationBarTextStyle 派生),不读任何业务状态。
+     * 角标:未读 >0 显示红点+数字,=0 只显示铃铛。
+     */
+    @Composable
+    private fun MiniProgramNotifyEntry(
+        iconColor: Color,
+        unread: Int,
+        onClick: () -> Unit,
+        modifier: Modifier = Modifier,
+    ) {
+        val badgeColor = Color(0xFFFA5151)
+        // 外层不裁剪:角标允许探出圆角热区;内层单独裁剪出圆形点击涟漪。
+        Box(modifier = modifier.size(NOTIFY_ENTRY_SIZE_DP.dp)) {
+            Box(
+                modifier = Modifier
+                    .size(NOTIFY_ENTRY_SIZE_DP.dp)
+                    .clip(CircleShape)
+                    .clickable(onClick = onClick),
+                contentAlignment = Alignment.Center,
+            ) {
+                Canvas(modifier = Modifier.size(20.dp)) {
+                    val w = size.width
+                    val h = size.height
+                    val stroke = 1.6.dp.toPx()
+                    // 铃身:圆顶 + 下摆外扩,描边绘制(不依赖 material-icons-extended)。
+                    val bell = Path().apply {
+                        moveTo(w * 0.16f, h * 0.70f)
+                        cubicTo(w * 0.16f, h * 0.44f, w * 0.26f, h * 0.30f, w * 0.50f, h * 0.30f)
+                        cubicTo(w * 0.74f, h * 0.30f, w * 0.84f, h * 0.44f, w * 0.84f, h * 0.70f)
+                        lineTo(w * 0.92f, h * 0.78f)
+                        lineTo(w * 0.08f, h * 0.78f)
+                        close()
+                    }
+                    drawPath(
+                        path = bell,
+                        color = iconColor,
+                        style = Stroke(width = stroke, cap = StrokeCap.Round, join = StrokeJoin.Round),
+                    )
+                    // 顶部提钮
+                    drawLine(
+                        color = iconColor,
+                        start = Offset(w * 0.50f, h * 0.20f),
+                        end = Offset(w * 0.50f, h * 0.30f),
+                        strokeWidth = stroke,
+                        cap = StrokeCap.Round,
+                    )
+                    // 铃舌
+                    drawCircle(color = iconColor, radius = w * 0.075f, center = Offset(w * 0.50f, h * 0.86f))
+                }
+            }
+            if (unread > 0) {
+                val label = if (unread > 99) "99+" else unread.toString()
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .offset(x = 3.dp, y = (-1).dp)
+                        .height(14.dp)
+                        .clip(CircleShape)
+                        .background(badgeColor)
+                        .padding(horizontal = 4.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = label,
+                        color = Color.White,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                    )
+                }
+            }
+        }
+    }
+
     @Composable
     private fun MiniProgramCapsuleButton(
         backgroundColor: Color,
@@ -2959,47 +2971,26 @@ class DiminaActivity : ComponentActivity() {
                     state.homeButtonHidden.value = false
                 }
 
-                // redirectTo 修复（2026-11-11）：旧实现 destroy(true)+init(false) 原位复用
-                // Bridge/WebView，跳过 addJavascriptInterface 重挂、jscore 回调重注册与
-                // canvasChannel 重建——reload 后 render→container 事件链静默死亡，新页面
-                // 所有 bindtap 永久失效（真机实证；navigateTo=新 Activity 全新桥、
-                // switchTab=独立桥完整 init 均正常）。改走与首次加载完全一致的已验证
-                // 路径：完整销毁旧桥 → createBridge/init(true) 重建全新桥（旧 WebView
-                // 复用，重挂注入接口幂等；新桥=新 bridgeId 无回调冲突）。
-                miniApp.removeBridge(miniProgram.appId, currentBridge)
-                currentBridge.destroy(false)
-
+                currentBridge.destroy(true)
+                // 更新当前 bridge 的配置
+                currentBridge.updateOptions(
+                    pathInfo = pathInfo,
+                    root = pageConfig?.root ?: "main",
+                    configInfo = mergedPageConfig
+                )
+                currentBridge.init(false)
                 if (activeTabState != null && activeTabIndex >= 0) {
-                    // tab 容器：置空桥状态，走 onTabWebViewReady 既有重建路径
-                    // （bridge==null 即全量 createBridge，start 仍由 pageLoaded 门控）
-                    activeTabState.bridge = null
-                    activeTabState.webView?.let { onTabWebViewReady(activeTabIndex, it) }
-                } else {
-                    // 非 tab 页：克隆旧桥 options（保留 isRoot/scene/referrerInfo 等语义，
-                    // 仅替换路径/根目录/页面配置），与 navigateTo 同款全量建桥
-                    withWebView { webView ->
-                        val freshBridge = createBridge(
-                            BridgeOptions(
-                                pathInfo = pathInfo,
-                                scene = currentBridge.options.scene,
-                                jscore = currentBridge.options.jscore,
-                                webview = webView,
-                                isRoot = currentBridge.options.isRoot,
-                                root = pageConfig?.root ?: "main",
-                                appId = currentBridge.options.appId,
-                                runtimeType = currentBridge.options.runtimeType,
-                                pages = currentBridge.options.pages,
-                                configInfo = mergedPageConfig,
-                                referrerInfo = currentBridge.options.referrerInfo,
-                            )
-                        )
-                        // Add bridge to MiniApp's bridge list for this appId
-                        miniApp.addBridge(miniProgram.appId, freshBridge)
-
-                        withWebViewPageLoaded {
-                            LogUtils.d(tag, "Page loaded, starting fresh bridge (redirectTo)")
-                            freshBridge.start()
+                    withTabWebViewPageLoaded(activeTabIndex) {
+                        if (!activeTabState.bridgeStarted) {
+                            LogUtils.d(tag, "Tab page loaded, restarting bridge: index=$activeTabIndex")
+                            activeTabState.bridgeStarted = true
+                            currentBridge.start()
                         }
+                    }
+                } else {
+                    withWebViewPageLoaded {
+                        LogUtils.d(tag, "Page loaded, restarting bridge")
+                        currentBridge.start()
                     }
                 }
             }
@@ -3034,6 +3025,10 @@ class DiminaActivity : ComponentActivity() {
 
         private const val HOST_GENERATION_KEY = "dimina_host_generation"
         private const val HOST_SESSION_KEY = "dimina_host_session"
+
+        // Header 通知入口:铃铛热区尺寸与它到胶囊左缘的间距(§6.3)。
+        private const val NOTIFY_ENTRY_SIZE_DP = 32
+        private const val NOTIFY_ENTRY_GAP_DP = 8
         private val hostSession = java.util.UUID.randomUUID().toString()
         private var hostGeneration = 0L
         private val pendingLaunches = mutableSetOf<String>()
@@ -3227,17 +3222,6 @@ class DiminaActivity : ComponentActivity() {
         }
 
         /**
-         * 框架升级确认弹窗的宿主入口:新包就绪时由 MiniApp 在主线程调用,路由到该
-         * 小程序当前最上层 Activity 展示「发现新版本」弹窗。
-         */
-        @androidx.annotation.MainThread
-        internal fun promptPendingUpdateFromHost(appId: String, versionCode: Int, versionName: String): Boolean {
-            val activity = activityRegistry.lastRegistered(appId) ?: return false
-            activity.promptPendingUpdate(versionCode, versionName)
-            return true
-        }
-
-        /**
          * autoSync 静默升级的宿主入口(autoSync 扩展):新包就绪且小程序正在运行时
          * 由 MiniApp 在主线程调用,直接走 [DiminaActivity.applyUpdate](激活+冷重启,
          * 与用户确认路径同一套,无弹窗)。返回 false = 该小程序没有在运行的 Activity,
@@ -3249,6 +3233,7 @@ class DiminaActivity : ComponentActivity() {
             activity.applyUpdate()
             return true
         }
+
 
         internal fun canEvictRetainedApp(appId: String): Boolean {
             val activity = activityRegistry.lastRegistered(appId) ?: return true

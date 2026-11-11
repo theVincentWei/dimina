@@ -3,8 +3,14 @@ package com.didi.dimina
 import android.app.Activity
 import android.content.Context
 import android.graphics.Color
+import android.os.Handler
+import android.os.Looper
 import androidx.annotation.ColorInt
 import androidx.annotation.MainThread
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import com.didi.dimina.api.ext.ExtModuleHandler
 import com.didi.dimina.bean.MiniProgram
 import com.didi.dimina.common.LogUtils
@@ -18,6 +24,25 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+/**
+ * 容器 Header 通知入口的状态。
+ *
+ * 框架不解释「通知」语义：这里只是一个入口壳（是否显示 / 未读角标 / 点击回调），
+ * 显示与否、角标数值、点击后打开什么页面都完全由宿主决定。属性是 Compose 可观察状态，
+ * 容器 Compose 树读取后会在宿主推送时自动重组；宿主从未设置时保持「不显示、无角标」，
+ * 对不接通知的其它嵌入方零影响。
+ */
+internal class NotifyEntryState {
+    var visible by mutableStateOf(false)
+        internal set
+
+    var unread by mutableIntStateOf(0)
+        internal set
+
+    var onEntryClick by mutableStateOf<(() -> Unit)?>(null)
+        internal set
+}
 
 /**
  * Author: Doslin
@@ -150,7 +175,8 @@ class Dimina private constructor(context: Context) {
     /**
      * 注册宿主侧升级事件监听(见 [MiniProgramUpdateListener])。
      *
-     * 升级由框架全权负责:容器后台检测+下载,弹窗问用户,确认后换包冷重启;
+     * 升级由框架全权负责:容器后台检测+下载,不询问用户(契约 §6.4「强制自动 + 仅告知」),
+     * pending 包在下次打开时静默激活;宿主用 onUpdateApplied 的版本号发告知。
      * 小程序侧不参与升级决策。传 null 注销。回调都在主线程。
      */
     fun setOnMiniProgramUpdateListener(listener: MiniProgramUpdateListener?) {
@@ -293,6 +319,44 @@ class Dimina private constructor(context: Context) {
 
     /** 宿主是否显式配置过胶囊颜色;false=走微信默认语义(CapsuleStyle)。 */
     internal fun hasExplicitCapsuleColors(): Boolean = config.capsuleColorsExplicit
+
+    // ---- 容器 Header 通知入口（宿主设置，框架只做入口壳） ----
+
+    private val notifyEntryStateImpl = NotifyEntryState()
+
+    /** 容器 Compose 树读取通知入口状态；宿主通过 [setNotifyEntry] 等三个方法推送。 */
+    internal fun notifyEntryState(): NotifyEntryState = notifyEntryStateImpl
+
+    /**
+     * 设置 Header 通知入口是否显示。
+     *
+     * 宿主从未调用时入口不显示（对其它嵌入方零影响）。容器不认识「通知」语义，
+     * 只按此开关渲染一个铃铛入口。
+     */
+    fun setNotifyEntry(visible: Boolean) {
+        runOnMainThread { notifyEntryStateImpl.visible = visible }
+    }
+
+    /**
+     * 设置通知未读数：`> 0` 显示红点角标与数字，`0` 隐藏数字（入口本身是否显示见 [setNotifyEntry]）。
+     * 未读数由宿主主动推送（轮询/已读变化时），容器不拉取。
+     */
+    fun setNotifyUnread(count: Int) {
+        runOnMainThread { notifyEntryStateImpl.unread = count.coerceAtLeast(0) }
+    }
+
+    /**
+     * 设置通知入口的点击回调；打开通知中心是宿主的事情，框架只负责把点击透传出来。
+     * 传 `null` 可清除回调，此时点击入口不做任何事。
+     */
+    fun setOnNotifyEntryClick(callback: (() -> Unit)?) {
+        runOnMainThread { notifyEntryStateImpl.onEntryClick = callback }
+    }
+
+    private fun runOnMainThread(block: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) block()
+        else Handler(Looper.getMainLooper()).post(block)
+    }
 
     /** Queries installed disk contents, not whether a runtime is currently alive. */
     fun isExistsApp(appId: String): Boolean = getAppVersionInfo(appId) != null

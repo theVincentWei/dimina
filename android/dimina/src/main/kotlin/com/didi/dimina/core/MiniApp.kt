@@ -120,21 +120,9 @@ class MiniApp private constructor() {
     private var updateListener: MiniProgramUpdateListener? = null
     private val updateMainHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
-    // 本次运行期用户已拒绝升级的版本(per app):拒绝后同一会话内不再重复弹窗;
-    // app 被 clear(关闭/卸载)即清除,下次打开重新问。
-    private val declinedUpdateVersions = mutableMapOf<String, Int>()
-
     @androidx.annotation.MainThread
     fun setOnUpdateListener(listener: MiniProgramUpdateListener?) {
         updateListener = listener
-    }
-
-    internal fun isUpdateDeclined(appId: String, versionCode: Int): Boolean =
-        synchronized(declinedUpdateVersions) { declinedUpdateVersions[appId] == versionCode }
-
-    internal fun recordUpdateDeclined(appId: String, versionCode: Int) {
-        synchronized(declinedUpdateVersions) { declinedUpdateVersions[appId] = versionCode }
-        notifyUpdateDeclined(appId, versionCode)
     }
 
     private fun notifyUpdate(appId: String, notify: (MiniProgramUpdateListener) -> Unit) {
@@ -145,9 +133,6 @@ class MiniApp private constructor() {
 
     internal fun notifyUpdateReady(appId: String, versionCode: Int, versionName: String) =
         notifyUpdate(appId) { it.onUpdateReady(appId, versionCode, versionName) }
-
-    internal fun notifyUpdateDeclined(appId: String, versionCode: Int) =
-        notifyUpdate(appId) { it.onUpdateDeclined(appId, versionCode) }
 
     internal fun notifyUpdateApplied(appId: String, versionCode: Int, versionName: String) =
         notifyUpdate(appId) { it.onUpdateApplied(appId, versionCode, versionName) }
@@ -295,10 +280,12 @@ class MiniApp private constructor() {
 
     /**
      * 后台检查结果统一出口。JS 总线事件保留(wx.getUpdateManager 向后兼容),同时走
-     * 框架链路:新包就绪 → 通知宿主监听器;若小程序正在运行,由容器弹窗问用户,确认后
-     * applyUpdate 换包冷重启。升级决策完全在框架侧,小程序不参与。
-     * autoSync 包(miniProgram.autoUpdate)例外:跳过弹窗直接激活——确认语义由
-     * 服务端 bundle.json 的 autoSync 字段表达。
+     * 框架链路。Bundle 升级是「强制自动 + 仅告知」(契约 §6.4):新包就绪时**不询问用户**。
+     * autoSync 包(miniProgram.autoUpdate)运行中直接静默升级(激活+冷重启,确认语义由
+     * 服务端 bundle.json 的 autoSync 字段表达);其余包不在运行中途冷重启——pending 包
+     * 留在磁盘,下次打开由容器静默激活(见 DiminaActivity 冷启动路径),激活后发
+     * onUpdateApplied(带版本号)供宿主发告知通知。运行中这里只发 onUpdateReady 供
+     * 宿主刷新状态(如市场页「有新版本」),无需用户操作。
      */
     private fun onRemoteUpdateEvent(context: Context, miniProgram: MiniProgram, event: String) {
         val appId = miniProgram.appId
@@ -309,19 +296,16 @@ class MiniApp private constructor() {
                 notifyUpdateReady(appId, pending.versionCode, pending.versionName)
                 if (miniProgram.autoUpdate) {
                     updateMainHandler.post {
-                        // 在跑 → 容器激活+冷重启(与用户确认路径同一套 applyUpdate);
-                        // 没在跑 → 这里直接激活 pending,下次打开即新版本。
+                        // autoSync 包:在跑 → 容器激活+冷重启(与用户确认路径同一套
+                        // applyUpdate);没在跑 → 这里直接激活 pending,下次打开即新版本。
                         if (!DiminaActivity.autoApplyPendingUpdateFromHost(appId)) {
                             if (RemoteUpdateManager.activatePendingUpdate(context, appId)) {
                                 notifyUpdateApplied(appId, pending.versionCode, pending.versionName)
                             }
                         }
                     }
-                } else if (!isUpdateDeclined(appId, pending.versionCode)) {
-                    updateMainHandler.post {
-                        DiminaActivity.promptPendingUpdateFromHost(appId, pending.versionCode, pending.versionName)
-                    }
                 }
+                // 非 autoUpdate:不询问、不运行中冷重启(§6.4);pending 留盘,下次启动静默激活。
             }
             RemoteUpdateManager.EVENT_UPDATE_FAILED -> notifyUpdateFailed(appId, null)
         }
@@ -649,10 +633,6 @@ class MiniApp private constructor() {
         updateCheckRegistry.reset(appId)
         synchronized(this) {
             pendingAppShowOptions.remove(appId)
-        }
-        // 拒绝升级只约束一次运行期;关掉小程序后下次打开重新问。
-        synchronized(declinedUpdateVersions) {
-            declinedUpdateVersions.remove(appId)
         }
         // Silently tear down this owner's WebSocket connections/timers/listeners first,
         // ahead of JsCore.destroy(), so no transport event can race into a dying JsCore.

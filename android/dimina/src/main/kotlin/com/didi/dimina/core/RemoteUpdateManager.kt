@@ -407,7 +407,7 @@ object RemoteUpdateManager {
     internal class PendingUpdateInfo(val versionCode: Int, val versionName: String)
 
     /**
-     * 探测已就绪的 pending 新包,供框架升级确认弹窗使用(弹窗问用户后才激活)。
+     * 探测已就绪的 pending 新包,供容器在冷启动时静默激活(契约 §6.4:强制自动升级,不弹窗)。
      * 只读不删:无效 pending 由 [readPendingPackage] 的既有清理逻辑处理。
      */
     internal fun peekPendingUpdate(context: Context, appId: String): PendingUpdateInfo? {
