@@ -490,6 +490,8 @@ message.on('canvasContextEvent', (event) => {
 
 let canvasResourceSerial = 1
 let canvasRafSerial = 1
+// 生产 rAF 与 Harmony PAG 共用同一条已验证的帧流订阅门（见 docs/WXWebAssembly.md）。
+const canvasSubscribeAnimationFrameSymbol = Symbol.for('dimina.canvas.subscribeAnimationFrame')
 
 function getCurrentBridgeId() {
 	const pageInfo = router.getPageInfo()
@@ -1869,6 +1871,9 @@ export class CanvasNode {
 		this.pendingStateFeedbacks = new Map()
 		this.stateFeedbackByProperty = new Map()
 		this.rafCallbacks = new Map()
+		// 帧流模式的一次性 rAF：requestId -> 用户回调；rafPumpUnsubscribe 为常驻订阅的退订句柄。
+		this.streamRafCallbacks = new Map()
+		this.rafPumpUnsubscribe = null
 		this.frameSubscriptions = new Set()
 		this.pendingOperations = []
 		this.flushScheduled = false
@@ -2182,6 +2187,18 @@ export class CanvasNode {
 
 	requestAnimationFrame(fn) {
 		const requestId = canvasRafSerial++
+		// 能力协商到 animationFrameStream===1 时走常驻帧流：不再逐帧一问一答，
+		// render 侧以 4 帧信用窗口连续调度真实 rAF（与 Harmony PAG 同一条快车道）。
+		const subscribe = this[canvasSubscribeAnimationFrameSymbol]
+		if (subscribe) {
+			try {
+				return this.requestAnimationFrameViaFrameStream(subscribe, requestId, fn)
+			}
+			catch (error) {
+				// 订阅建立失败（通道关闭、预算耗尽等）时退回一次性 rAF，游戏循环不中断。
+				console.error('[canvas] frame stream rAF unavailable, falling back to one-shot:', error)
+			}
+		}
 		const callbackId = this.storeCallback((timestamp) => {
 			this.rafCallbacks.delete(requestId)
 			if (isFunction(fn)) {
@@ -2204,7 +2221,52 @@ export class CanvasNode {
 		return requestId
 	}
 
+	requestAnimationFrameViaFrameStream(subscribe, requestId, fn) {
+		// 首个 pending rAF 建立常驻订阅，其后所有 rAF 复用；tick 到达时分发给当帧全部 pending。
+		if (!this.rafPumpUnsubscribe) {
+			this.rafPumpUnsubscribe = subscribe(timestamp => this.dispatchStreamRaf(timestamp))
+		}
+		this.streamRafCallbacks.set(requestId, fn)
+		return requestId
+	}
+
+	dispatchStreamRaf(timestamp) {
+		if (this.streamRafCallbacks.size === 0) {
+			this.stopFrameStreamPump()
+			return
+		}
+		// 先快照再清空：回调内重挂的 rAF 归入下一帧，保持一次性语义（每个注册恰好触发一次）。
+		const pending = [...this.streamRafCallbacks.values()]
+		this.streamRafCallbacks.clear()
+		let firstError
+		for (const handler of pending) {
+			if (!isFunction(handler)) continue
+			try {
+				handler(timestamp)
+			}
+			catch (error) {
+				// 单个回调异常不吞掉同帧其余回调；信用已在订阅层先行归还。
+				firstError ||= error
+			}
+		}
+		if (this.streamRafCallbacks.size === 0) this.stopFrameStreamPump()
+		if (firstError) throw firstError
+	}
+
+	stopFrameStreamPump() {
+		const unsubscribe = this.rafPumpUnsubscribe
+		this.rafPumpUnsubscribe = null
+		// 退订经由 pendingCallbacks 的 owner 清理：suspend 取消 render 侧订阅并移出 frameSubscriptions。
+		unsubscribe?.()
+	}
+
 	cancelAnimationFrame(requestId) {
+		if (this.streamRafCallbacks.delete(requestId)) {
+			// 帧流模式的 requestId 未在 render 侧单独注册，取消无需过桥；
+			// 最后一个 pending 移除后立即退订，避免空转的常驻订阅。
+			if (this.streamRafCallbacks.size === 0) this.stopFrameStreamPump()
+			return
+		}
 		this.removeCallback(this.rafCallbacks.get(requestId))
 		this.rafCallbacks.delete(requestId)
 		sendCanvasMessage(this.bridgeId, 'canvasNodeCancelAnimationFrame', {
@@ -2275,6 +2337,8 @@ export class CanvasNode {
 			this.removeCallback(callbackId, reason)
 		}
 		this.rafCallbacks.clear()
+		this.streamRafCallbacks.clear()
+		this.stopFrameStreamPump()
 		for (const context of this.contextsById.values()) {
 			if (context.contextType === 'webgl') context.retiredBufferResources?.dispose?.()
 		}
