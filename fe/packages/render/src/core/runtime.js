@@ -2205,6 +2205,7 @@ class Runtime {
 			nodeId,
 			canvas,
 			type,
+			game: true,
 			contexts: new Map(),
 			resourceIds: new Set(),
 			bridgeId,
@@ -2761,9 +2762,12 @@ class Runtime {
 			}
 			case 'toDataURL': {
 				const mimeType = operation.mimeType || 'image/png'
+				// WebGL 游戏画布的 GL 画布在每次 present 后清空默认帧缓冲，导出
+				// 必须读上屏画布（恒持最后一次 present 的完整帧）。
+				const exportCanvas = node.presentation ? node.presentation.canvas : node.canvas
 				const dataURL = operation.quality !== undefined
-					? node.canvas.toDataURL(mimeType, operation.quality)
-					: node.canvas.toDataURL(mimeType)
+					? exportCanvas.toDataURL(mimeType, operation.quality)
+					: exportCanvas.toDataURL(mimeType)
 				this.triggerCallback(bridgeId, operation.callback,
 					operation.resultEnvelope ? { ok: true, value: dataURL } : dataURL)
 				break
@@ -3161,6 +3165,19 @@ class Runtime {
 		this.triggerCallback(bridgeId, params.complete, result, result)
 	}
 
+	// 游戏上屏 canvas 不走 WXML 的 canvas-id DOM 契约，服务层只递节点 id。
+	// 命中游戏节点时返回可导出的那张画布：有 presentation 的 WebGL 节点必须读
+	// 上屏 2D 画布——它恒持最后一次 present 的完整帧；GL 离屏画布的默认帧缓冲
+	// 在每次 present 后已按 preserveDrawingBuffer=false 语义清空，作为导出源只会
+	// 得到空图。2D 游戏节点没有 presentation，节点画布本身就是上屏画布。
+	resolveGameCanvasNode(canvasId, bridgeId) {
+		if (typeof canvasId !== 'string' || canvasId.length === 0) return null
+		const node = this.canvasNodes.get(canvasId)
+		if (!node?.game) return null
+		if (node.bridgeId && bridgeId && node.bridgeId !== bridgeId) return null
+		return node.presentation ? node.presentation.canvas : node.canvas
+	}
+
 	async getCanvasElement(canvasId, moduleId, bridgeId) {
 		// 逻辑层在未显式传组件时使用页面 bridgeId；页面根本身则登记在另一套 pageId 下。
 		// bridgeId 明确代表当前页面作用域，可以直接落到 document.body，不能把它当成失效组件 id。
@@ -3200,6 +3217,8 @@ class Runtime {
 
 		const resolved = resolve()
 		if (resolved) return resolved
+		const gameCanvas = this.resolveGameCanvasNode(canvasId, bridgeId)
+		if (gameCanvas) return gameCanvas
 		return new Promise((done) => {
 			const settle = () => {
 				const canvas = resolve()
