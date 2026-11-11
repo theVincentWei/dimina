@@ -20,7 +20,7 @@ import java.io.File
  * - the collapsed handle NEVER auto-expands (the 6s idle timer was removed on 2026-11-11:
  *   collapsing keeps the capsule hidden until the user taps the edge handle);
  * - the collapsed handle is a capsule-height hairline bar with an oversized hit area
- *   (44×48dp, Android minimum touch target), no background pill, no border.
+ *   (capsule-footprint wide × 56dp tall), no background pill, no border.
  *
  * Assertions read the source text, same rationale as [DiminaActivityThemeWiringTest].
  */

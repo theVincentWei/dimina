@@ -2212,11 +2212,12 @@ class DiminaActivity : ComponentActivity() {
                 // 唯一的展开入口是下方贴边把手的点击热区。滑动/静置都不会再把胶囊召唤出来。
                 if (capsuleCollapsed.value) {
                     // 收起态:贴边发丝细条(2026-11-11 重设计,取代旧「半透明方块+黑描边+两点」)。
-                    // 视觉 = 5×32dp 细条:与胶囊同高(MenuButtonLayout.HEIGHT_DP)、同一垂直锚点,
+                    // 视觉 = 10×32dp 细条:与胶囊同高(MenuButtonLayout.HEIGHT_DP)、同一垂直锚点,
                     // 颜色 = 图标色 @ COLLAPSED_HANDLE_VISUAL_ALPHA(随 navigationBarTextStyle 自
                     // 适应,深浅色页面都可见);无底、无描边。
-                    // 热区 = 44×48dp(视觉上下各外扩 8dp,满足 Android 48dp 最小可点标准),
-                    // 从屏幕右缘向内延伸,手指不用精确瞄准细条。
+                    // 热区 = 87×56dp(宽=胶囊 footprint 同宽,高=视觉上下各外扩 12dp),
+                    // 从屏幕右缘向内延伸,手指不用精确瞄准细条
+                    // (2026-11-11 用户反馈「宽度不够」后:热区宽度直接对齐胶囊宽)。
                     Box(
                         modifier = Modifier
                             .align(Alignment.TopEnd)
@@ -3068,16 +3069,16 @@ class DiminaActivity : ComponentActivity() {
         private const val NOTIFY_ENTRY_GAP_DP = 8
 
         // 胶囊收起态把手(2026-11-11 重设计):视觉细条 + 超尺寸点击热区。
-        private const val COLLAPSED_HANDLE_VISUAL_WIDTH_DP = 5
+        private const val COLLAPSED_HANDLE_VISUAL_WIDTH_DP = 10
 
         /** 收起态细条不透明度:图标色 @ alpha,深浅色页面都安静可见。 */
         private const val COLLAPSED_HANDLE_VISUAL_ALPHA = 0.35f
 
-        /** 收起态热区宽:从屏幕右缘向内,远大于视觉宽,点哪都能展开。 */
-        private const val COLLAPSED_HANDLE_HIT_WIDTH_DP = 44
+        /** 收起态热区宽 = 胶囊 footprint 同宽(87dp):用户反馈「宽度不够」后对齐胶囊宽。 */
+        private const val COLLAPSED_HANDLE_HIT_WIDTH_DP = MenuButtonLayout.WIDTH_DP
 
-        /** 热区垂直外扩:32dp 视觉上下各扩 8dp → 48dp,满足 Android 最小可点标准。 */
-        private const val COLLAPSED_HANDLE_HIT_OVERHANG_DP = 8
+        /** 热区垂直外扩:32dp 视觉上下各扩 12dp → 56dp(高度用户已认可,维持)。 */
+        private const val COLLAPSED_HANDLE_HIT_OVERHANG_DP = 12
 
         private val hostSession = java.util.UUID.randomUUID().toString()
         private var hostGeneration = 0L
