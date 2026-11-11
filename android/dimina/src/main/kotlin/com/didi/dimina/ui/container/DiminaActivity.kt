@@ -217,6 +217,12 @@ class DiminaActivity : ComponentActivity() {
     // 主题 tick:每次 resume 自增,胶囊重组时重读容器配色(updateCapsuleTheme 生效)。
     private val capsuleThemeTick = mutableIntStateOf(0)
 
+    // 胶囊左侧静音钮(2026-11-12):「显示」= 包声明 requiredBackgroundModes 含 "audio"
+    // (配置就绪即显)或 AudioApi 首次创建实例(未声明老包兜底);渲染在胶囊展开分支内,
+    // 收起时随胶囊一起隐藏。静音 = AudioApi 全局有效音量置 0,不打断播放进度与事件。
+    private val miniProgramAudioActive = mutableStateOf(false)
+    private val miniProgramAudioMuted = mutableStateOf(false)
+
     private val mediaType = mutableStateOf(MediaType.NONE)
     private val maxImageCount = mutableIntStateOf(1)
     private val videoCaptureOptions = mutableStateOf(VideoCaptureOptions())
@@ -592,6 +598,10 @@ class DiminaActivity : ComponentActivity() {
             miniProgram = program
             activityRegistry.register(miniProgram.appId, this)
             pendingLaunches.remove(miniProgram.appId)
+            // Activity 重建(旋转/系统回收)时恢复静音钮状态:容器打点/静音位仍在。
+            // 声明位(appConfig)此时尚未解析,由 initialize() 读到配置后补齐。
+            miniProgramAudioActive.value = miniApp.audioApi.isAudioActive(miniProgram.appId)
+            miniProgramAudioMuted.value = miniApp.audioApi.isMuted(miniProgram.appId)
             LogUtils.d(
                 tag,
                 "Successfully obtained MiniApp instance and JsCore for appId: ${miniProgram.appId}"
@@ -792,6 +802,11 @@ class DiminaActivity : ComponentActivity() {
             // 切换到主线程设置UI
             withContext(Dispatchers.Main) {
                 // 4.设置标题栏以及状态栏颜色模式
+                // 声明门禁(2026-11-12):requiredBackgroundModes 含 "audio" → 打开即显示
+                // 胶囊左侧静音钮,不等第一次出声。
+                if (appConfig.app.requiredBackgroundModes?.contains("audio") == true) {
+                    miniProgramAudioActive.value = true
+                }
                 tabBarConfigState.value = appConfig.app.tabBar
                 resetTabBarDynamicState(appConfig.app.tabBar)
                 val initialTabIndex = getTabBarIndex(pathInfo.pagePath)
@@ -1920,6 +1935,8 @@ class DiminaActivity : ComponentActivity() {
                     navigationBarTitle.value.ifBlank { "小程序" }
                 },
                 iconPng = miniProgram.iconPng,
+                versionName = miniProgram.versionName,
+                versionCode = miniProgram.versionCode,
                 onReenterClick = {
                     showMiniProgramMenu.value = false
                     reenterMiniProgram()
@@ -2203,7 +2220,11 @@ class DiminaActivity : ComponentActivity() {
                             .padding(
                                 top = capsuleTopPadding,
                                 end = (windowInfo.getInt("windowWidth") - menuRect.right).dp +
-                                    MenuButtonLayout.WIDTH_DP.dp + NOTIFY_ENTRY_GAP_DP.dp
+                                    MenuButtonLayout.WIDTH_DP.dp + NOTIFY_ENTRY_GAP_DP.dp +
+                                    (if (miniProgramAudioActive.value) {
+                                        // 静音钮占用胶囊左侧槽位时,通知入口整体左移让位。
+                                        MenuButtonLayout.HEIGHT_DP.dp + NOTIFY_ENTRY_GAP_DP.dp
+                                    } else 0.dp)
                             )
                             .zIndex(10f)
                     )
@@ -2247,6 +2268,28 @@ class DiminaActivity : ComponentActivity() {
                         )
                     }
                 } else {
+                    // 静音钮(2026-11-12):仅展开态渲染 → 收起时随胶囊一起隐藏;
+                    // 贴胶囊左侧,槽位与通知入口一致(通知入口可见时由其主动让位)。
+                    if (miniProgramAudioActive.value) {
+                        MiniProgramMuteButton(
+                            muted = miniProgramAudioMuted.value,
+                            backgroundColor = capsuleBg,
+                            iconColor = capsuleFg,
+                            onClick = {
+                                val next = !miniProgramAudioMuted.value
+                                miniProgramAudioMuted.value = next
+                                MiniApp.getInstance().audioApi.setMuted(miniProgram.appId, next)
+                            },
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(
+                                    top = capsuleTopPadding,
+                                    end = (windowInfo.getInt("windowWidth") - menuRect.right).dp +
+                                        MenuButtonLayout.WIDTH_DP.dp + NOTIFY_ENTRY_GAP_DP.dp
+                                )
+                                .zIndex(10f)
+                        )
+                    }
                     MiniProgramCapsuleButton(
                         backgroundColor = capsuleBg,
                         iconColor = capsuleFg,
@@ -2269,6 +2312,12 @@ class DiminaActivity : ComponentActivity() {
 
     /** Hide the owned task without destroying its Activities, WebViews or JS runtime. */
     fun isMiniProgramForeground(): Boolean = isMiniProgramInitialized && visibilityTracker.isForeground(miniProgram.appId)
+
+    /** AudioApi 首次为当前 app 创建音频实例时打点:点亮胶囊左侧静音钮(未声明包的兜底信号)。 */
+    internal fun markMiniProgramAudioActive() {
+        miniProgramAudioActive.value = true
+        miniProgramAudioMuted.value = MiniApp.getInstance().audioApi.isMuted(miniProgram.appId)
+    }
 
     fun hideMiniProgram() {
         if (!isMiniProgramForeground() || isFinishing) return
@@ -2539,6 +2588,8 @@ class DiminaActivity : ComponentActivity() {
     private fun MiniProgramMenuSheet(
         appName: String,
         iconPng: ByteArray?,
+        versionName: String,
+        versionCode: Int,
         onReenterClick: () -> Unit,
         onCloseClick: () -> Unit,
         onDismiss: () -> Unit
@@ -2607,7 +2658,13 @@ class DiminaActivity : ComponentActivity() {
                             fontWeight = FontWeight.SemiBold
                         )
                         Text(
-                            text = "小程序",
+                            // 版本副标题(2026-11-12):应用名下直接标「v版本名」(bundle version.name);
+                            // 缺版本名回落 v版本号,两者都缺回落「小程序」(老宿主兼容)。
+                            text = when {
+                                versionName.isNotBlank() -> "v" + versionName.trim().removePrefix("v")
+                                versionCode > 0 -> "v$versionCode"
+                                else -> "小程序"
+                            },
                             fontSize = 14.sp,
                             color = sheetSub
                         )
@@ -2777,6 +2834,79 @@ class DiminaActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * 胶囊左侧音频静音钮(2026-11-12):32dp 圆钮,风格与胶囊同款(半透底+发丝描边),
+     * 图标色与胶囊同源(navigationBarTextStyle 派生)。显示条件 = 包声明 requiredBackgroundModes
+     * 含 "audio"(配置就绪即显)或 AudioApi 首次建实例(未声明老包兜底);本 composable 只在
+     * 胶囊展开分支渲染 → 收起时随胶囊一起隐藏。静音 = AudioApi 全局有效音量置 0,
+     * 不打断播放进度与事件,取消静音即恢复。
+     */
+    @Composable
+    private fun MiniProgramMuteButton(
+        muted: Boolean,
+        backgroundColor: Color,
+        iconColor: Color,
+        onClick: () -> Unit,
+        modifier: Modifier = Modifier
+    ) {
+        val borderColor = Color(CapsuleStyle.borderColor(iconColor.toArgb()))
+        Box(
+            modifier = modifier
+                .size(MenuButtonLayout.HEIGHT_DP.dp)
+                .shadow(if (backgroundColor.alpha == 1f) 1.dp else 0.dp, CircleShape, clip = false)
+                .clip(CircleShape)
+                .background(backgroundColor)
+                .border(BorderStroke(0.5.dp, borderColor), CircleShape)
+                .clickable(onClick = onClick),
+            contentAlignment = Alignment.Center
+        ) {
+            Canvas(modifier = Modifier.size(20.dp)) {
+                val w = size.width
+                val h = size.height
+                // 喇叭 horn:矩形喉部 + 外扩锥口,实心填充(与铃铛同一套 Canvas 自绘风格,
+                // 不依赖 material-icons-extended)。
+                val horn = Path().apply {
+                    moveTo(w * 0.10f, h * 0.40f)
+                    lineTo(w * 0.26f, h * 0.40f)
+                    lineTo(w * 0.46f, h * 0.22f)
+                    lineTo(w * 0.46f, h * 0.78f)
+                    lineTo(w * 0.26f, h * 0.60f)
+                    lineTo(w * 0.10f, h * 0.60f)
+                    close()
+                }
+                drawPath(
+                    path = horn,
+                    color = iconColor.copy(alpha = if (muted) 0.45f else 1f),
+                )
+                if (muted) {
+                    // 静音态:斜杠取代声波弧(喇叭本体降透明)。
+                    drawLine(
+                        color = iconColor,
+                        start = Offset(w * 0.58f, h * 0.30f),
+                        end = Offset(w * 0.88f, h * 0.70f),
+                        strokeWidth = 1.8.dp.toPx(),
+                        cap = StrokeCap.Round,
+                    )
+                } else {
+                    // 出声态:两道声波弧(圆心=锥口)。
+                    val cx = w * 0.48f
+                    val cy = h * 0.50f
+                    listOf(0.17f, 0.29f).forEach { r ->
+                        drawArc(
+                            color = iconColor,
+                            startAngle = -52f,
+                            sweepAngle = 104f,
+                            useCenter = false,
+                            topLeft = Offset(cx - w * r, cy - w * r),
+                            size = Size(w * r * 2f, w * r * 2f),
+                            style = Stroke(width = 1.7.dp.toPx(), cap = StrokeCap.Round),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
     @Composable
     private fun MiniProgramCapsuleButton(
         backgroundColor: Color,
@@ -2864,11 +2994,22 @@ class DiminaActivity : ComponentActivity() {
 
     @Composable
     fun LoadingAnimation(miniProgram: MiniProgram) {
-        // 使用 remember 记忆颜色值，避免每次重组时重新创建
+        // 壳层 chrome 跟系统深浅色(2026-11-12,与菜单弹层同一套深色语义);
+        // 宿主显式覆写(capsuleDarkOverride)优先。
+        val dark = Dimina.getInstance().capsuleDarkOverride() ?: isSystemInDarkTheme()
+        val maskColor = if (dark) Color(0xFF17181D) else Color.White
+        val nameColor = if (dark) Color(0xFFE8EAED) else Color.Black
+        val trackColor = if (dark) Color.White.copy(alpha = 0.16f) else Color.LightGray.copy(alpha = 0.3f)
+        val dotColor = Color(0xFF4CAF50)
         val iconColor = remember(miniProgram.name) { Color(Utils.generateColorFromName(miniProgram.name)) }
-        val trackColor = remember { Color.LightGray.copy(alpha = 0.3f) }
-        val dotColor = remember { Color(0xFF4CAF50) }
         val firstLetter = remember(miniProgram.name) { miniProgram.name.take(1).ifBlank { "小" } }
+        // 包图标(桌面/市场/菜单弹层同源 iconPng):画成圆形(2026-11-12 拍板,不要圆角矩形);
+        // 无图标回落首字母圆瓦片(旧观感)。
+        val appIcon = remember(miniProgram.iconPng) {
+            miniProgram.iconPng?.let {
+                runCatching { BitmapFactory.decodeByteArray(it, 0, it.size) }.getOrNull()
+            }
+        }
 
         // 使用 InfiniteTransition 创建无限循环动画
         val infiniteTransition = rememberInfiniteTransition(label = "loadingRotation")
@@ -2889,7 +3030,7 @@ class DiminaActivity : ComponentActivity() {
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color.White), // 添加背景遮住后面的 Webview
+                .background(maskColor), // 遮住后面的 Webview
             contentAlignment = Alignment.Center
         ) {
             Column(
@@ -2900,25 +3041,15 @@ class DiminaActivity : ComponentActivity() {
                     modifier = Modifier.size(80.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    val dotRadiusDp = 4.dp
-
                     Canvas(
                         modifier = Modifier.fillMaxSize()
                     ) {
-                        // 预计算常量值，避免在绘制时重复计算
+                        // 中央大圆不再由 Canvas 画(中央让给包图标/首字母瓦片),
+                        // 只画轨道与旋转小圆点;轨道半径维持旧观感(minSize/4 * 1.5)。
                         val minSize = minOf(size.width, size.height)
-                        val circleRadius = minSize / 4
+                        val orbitRadius = minSize / 4 * 1.5f
                         val centerX = size.width / 2
                         val centerY = size.height / 2
-                        val orbitRadius = circleRadius * 1.5f
-                        val dotRadius = dotRadiusDp.toPx()
-
-                        // 绘制大圆（背景）
-                        drawCircle(
-                            color = iconColor,
-                            radius = circleRadius,
-                            center = Offset(centerX, centerY)
-                        )
 
                         // 绘制轨道
                         drawCircle(
@@ -2928,25 +3059,42 @@ class DiminaActivity : ComponentActivity() {
                             style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.dp.toPx())
                         )
 
-                        // 绘制小圆点（旋转）- 只有这部分需要在每一帧更新
+                        // 绘制小圆点(旋转)- 只有这部分需要在每一帧更新
                         val angleInRadians = Math.toRadians(rotation.toDouble()).toFloat()
                         val dotX = centerX + orbitRadius * cos(angleInRadians)
                         val dotY = centerY + orbitRadius * sin(angleInRadians)
 
                         drawCircle(
                             color = dotColor,
-                            radius = dotRadius,
+                            radius = 4.dp.toPx(),
                             center = Offset(dotX, dotY)
                         )
                     }
 
-                    Text(
-                        text = firstLetter,
-                        color = Color.White,
-                        fontSize = 20.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.align(Alignment.Center)
-                    )
+                    if (appIcon != null) {
+                        Image(
+                            bitmap = appIcon.asImageBitmap(),
+                            contentDescription = miniProgram.name,
+                            modifier = Modifier
+                                .size(46.dp)
+                                .clip(CircleShape)
+                        )
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(CircleShape)
+                                .background(iconColor),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = firstLetter,
+                                color = Color.White,
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
                 }
                 // 底部文本
                 Spacer(modifier = Modifier.height(8.dp))
@@ -2954,7 +3102,7 @@ class DiminaActivity : ComponentActivity() {
                     text = miniProgram.name,
                     style = TextStyle(
                         fontSize = 16.sp,
-                        color = Color.Black,
+                        color = nameColor,
                         fontWeight = FontWeight.Medium
                     )
                 )

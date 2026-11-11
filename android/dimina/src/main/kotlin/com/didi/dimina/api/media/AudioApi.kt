@@ -153,10 +153,43 @@ class AudioApi : BaseApiHandler() {
             .put("duration", cachedDuration)
             .put("currentTime", cachedCurrentTime)
             .put("paused", paused)
+
+        /** 有效音量 = 实例自身音量 × 容器静音位(静音=0);不打断播放状态与事件。 */
+        fun applyEffectiveVolume(target: MediaPlayer) {
+            val effective = if (mutedApps[appId] == true) 0.0 else volume
+            runCatching { target.setVolume(effective.toFloat(), effective.toFloat()) }
+        }
     }
 
     private val sessions = ConcurrentHashMap<Pair<String, String>, InnerAudioInstance>()
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    /** 创建过音频实例的 app(本容器会话):宿主 UI 据此决定是否显示胶囊左侧静音钮。 */
+    private val audioApps = ConcurrentHashMap.newKeySet<String>()
+
+    /** 容器级静音位(appId → muted):静音=有效音量置 0,不打断播放状态与事件。 */
+    private val mutedApps = ConcurrentHashMap<String, Boolean>()
+
+    /** 该小程序本会话是否用过音频(建过 InnerAudio 实例)。 */
+    fun isAudioActive(appId: String): Boolean = audioApps.contains(appId)
+
+    /** 该小程序当前是否被容器静音(胶囊左侧静音钮状态)。 */
+    fun isMuted(appId: String): Boolean = mutedApps[appId] == true
+
+    /**
+     * 静音开关(胶囊左侧静音钮调用):置位后对该 app 全部活实例即时生效
+     * (有效音量 0 ↔ 实例自身音量),之后新建的实例同样按位生效。
+     */
+    fun setMuted(appId: String, muted: Boolean) {
+        mutedApps[appId] = muted
+        mainHandler.post {
+            sessions.keys.filter { it.first == appId }.forEach { key ->
+                sessions[key]?.let { instance ->
+                    instance.player?.let { target -> instance.applyEffectiveVolume(target) }
+                }
+            }
+        }
+    }
 
     override val apiNames = setOf(
         "InnerAudio.setSrc", "InnerAudio.play", "InnerAudio.pause", "InnerAudio.stop",
@@ -166,10 +199,15 @@ class AudioApi : BaseApiHandler() {
 
     fun clearApp(appId: String) {
         sessions.keys.filter { it.first == appId }.forEach { sessions.remove(it)?.destroy() }
+        // app 会话结束:音频「用过」打点与静音位一并复位(下次打开重新计)。
+        audioApps.remove(appId)
+        mutedApps.remove(appId)
     }
 
     fun clearAll() {
         sessions.keys.toList().forEach { sessions.remove(it)?.destroy() }
+        audioApps.clear()
+        mutedApps.clear()
     }
 
     override fun handleAction(
@@ -195,6 +233,11 @@ class AudioApi : BaseApiHandler() {
                 if (src.isEmpty()) return asyncFail(apiName, "invalid src")
                 val instance = sessions.getOrPut(key) {
                     InnerAudioInstance(appId, instanceId, audioManagerOf(activity))
+                }
+                // 「用过音频」打点(2026-11-12 胶囊静音钮):首次创建实例时点亮宿主静音钮,
+                // 兜底覆盖未声明 requiredBackgroundModes 的老包。
+                if (audioApps.add(appId)) {
+                    mainHandler.post { activity.markMiniProgramAudioActive() }
                 }
                 mainHandler.post { instance.setSrc(activity, src) }
                 asyncOk(apiName)
@@ -427,6 +470,8 @@ class AudioApi : BaseApiHandler() {
         cachedDuration = runCatching { target.duration / 1000.0 }.getOrDefault(0.0)
         cachedCurrentTime = 0.0
         applyPlaybackRate(target)
+        // 静音位在 prepare 完成时落一次,保证 autoplay/pending 起播即按有效音量出声。
+        applyEffectiveVolume(target)
         val seekToMs = if (pendingSeekMs >= 0) pendingSeekMs.toLong() else (startTime * 1000).toLong()
         if (seekToMs > 0) {
             suppressNextSeeked = true
@@ -558,7 +603,7 @@ class AudioApi : BaseApiHandler() {
         if (params.has("obeyMuteSwitch")) obeyMuteSwitch = params.optBoolean("obeyMuteSwitch", obeyMuteSwitch)
         player?.let { target ->
             runCatching { target.isLooping = loop }
-            runCatching { target.setVolume(volume.toFloat(), volume.toFloat()) }
+            applyEffectiveVolume(target)
             if (prepared) applyPlaybackRate(target)
         }
     }

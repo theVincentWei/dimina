@@ -22,6 +22,11 @@ data class App(
     val networkTimeout: NetworkTimeout? = null,
     val debug: Boolean? = null,
     /**
+     * 微信语义声明(app.json requiredBackgroundModes):含 "audio" 即声明使用音频,
+     * 容器打开即显示胶囊左侧静音钮(2026-11-12)。未声明包仍由 AudioApi 首次建实例兜底点亮。
+     */
+    val requiredBackgroundModes: List<String>? = null,
+    /**
      * 微信语义深色模式：app.json 声明 "darkmode": true 且编译器把 theme.json 变量表打进
      * app.theme 后，壳层配置（window/tabBar 及页面级 window 段）的 "@key" 引用才按当前
      * 系统主题解析。默认 false，旧包与未适配包完全走现状路径。

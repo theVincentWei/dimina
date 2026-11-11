@@ -109,7 +109,8 @@ class MiniApp private constructor() {
     private val apiRegistry = ApiRegistry()
     private val bluetoothApi = BluetoothApi()
     private val videoDecoderApi = VideoDecoderApi()
-    private val audioApi = AudioApi()
+    // internal:壳(DiminaActivity)读音频打点/静音位,驱动胶囊左侧静音钮(2026-11-12)。
+    internal val audioApi = AudioApi()
     private val recorderApi = RecorderApi()
     private val localNetworkApi = LocalNetworkApi()
     private val deviceNetworkApi = com.didi.dimina.api.device.NetworkApi()
