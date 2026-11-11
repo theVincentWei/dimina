@@ -103,6 +103,8 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.PathParser
+import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -2870,48 +2872,17 @@ class DiminaActivity : ComponentActivity() {
                 .clickable(onClick = onClick),
             contentAlignment = Alignment.Center
         ) {
+            // Material Design 官方 volume_up / volume_off 字形(24dp 视口,Apache-2.0 现成
+            // 素材,即系统音量图标),经 PathParser 落 Compose Path 等比缩放绘制——
+            // 手绘喇叭/波纹/斜杠读不出标准语义(2026-11-12 用户反馈)。
+            val glyph = remember(muted) {
+                PathParser().parsePathString(
+                    if (muted) MATERIAL_VOLUME_OFF_PATH else MATERIAL_VOLUME_UP_PATH,
+                ).toPath(Path())
+            }
             Canvas(modifier = Modifier.size(20.dp)) {
-                val w = size.width
-                val h = size.height
-                // 喇叭 horn:矩形喉部 + 外扩锥口,实心填充(与铃铛同一套 Canvas 自绘风格,
-                // 不依赖 material-icons-extended)。
-                val horn = Path().apply {
-                    moveTo(w * 0.10f, h * 0.40f)
-                    lineTo(w * 0.26f, h * 0.40f)
-                    lineTo(w * 0.46f, h * 0.22f)
-                    lineTo(w * 0.46f, h * 0.78f)
-                    lineTo(w * 0.26f, h * 0.60f)
-                    lineTo(w * 0.10f, h * 0.60f)
-                    close()
-                }
-                drawPath(
-                    path = horn,
-                    color = iconColor.copy(alpha = if (muted) 0.45f else 1f),
-                )
-                if (muted) {
-                    // 静音态:斜杠取代声波弧(喇叭本体降透明)。
-                    drawLine(
-                        color = iconColor,
-                        start = Offset(w * 0.58f, h * 0.30f),
-                        end = Offset(w * 0.88f, h * 0.70f),
-                        strokeWidth = 1.8.dp.toPx(),
-                        cap = StrokeCap.Round,
-                    )
-                } else {
-                    // 出声态:两道声波弧(圆心=锥口)。
-                    val cx = w * 0.48f
-                    val cy = h * 0.50f
-                    listOf(0.17f, 0.29f).forEach { r ->
-                        drawArc(
-                            color = iconColor,
-                            startAngle = -52f,
-                            sweepAngle = 104f,
-                            useCenter = false,
-                            topLeft = Offset(cx - w * r, cy - w * r),
-                            size = Size(w * r * 2f, w * r * 2f),
-                            style = Stroke(width = 1.7.dp.toPx(), cap = StrokeCap.Round),
-                        )
-                    }
+                scale(size.minDimension / 24f, size.minDimension / 24f, pivot = Offset.Zero) {
+                    drawPath(glyph, color = iconColor)
                 }
             }
         }
@@ -3225,6 +3196,20 @@ class DiminaActivity : ComponentActivity() {
         // Header 通知入口:铃铛热区尺寸与它到胶囊左缘的间距(§6.3)。
         private const val NOTIFY_ENTRY_SIZE_DP = 32
         private const val NOTIFY_ENTRY_GAP_DP = 8
+
+        /** Material Design `volume_up` 官方字形(24dp 视口,Apache-2.0 现成素材)。 */
+        private const val MATERIAL_VOLUME_UP_PATH =
+            "M3,9v6h4l5,5V4L7,9H3z M13.5,12c0,-1.77 -1.02,-3.29 -2.5,-4.03v8.05c1.48,-0.73 " +
+                "2.5,-2.25 2.5,-4.02z M14,3.23v2.06c2.89,0.86 5,3.54 5,6.71s-2.11,5.85 -5,6.71" +
+                "v2.06c4.01,-0.91 7,-4.49 7,-8.77s-2.99,-7.86 -7,-8.77z"
+
+        /** Material Design `volume_off` 官方字形(24dp 视口,Apache-2.0 现成素材)。 */
+        private const val MATERIAL_VOLUME_OFF_PATH =
+            "M16.5,12c0,-1.77 -1.02,-3.29 -2.5,-4.03v2.21l2.45,2.45c0.03,-0.2 0.05,-0.41 " +
+                "0.05,-0.63z M19.53,14.45l1.53,1.53c0.32,-0.94 0.52,-1.94 0.52,-2.98 " +
+                "0,-4.28 -2.99,-7.86 -7,-8.77v2.06c2.89,0.86 5,3.54 5,6.71 0,0.88 -0.15,1.72 " +
+                "-0.42,2.48z M4.27,3L3,4.27 7.73,9H3v6h4l5,5v-6.73l4.73,4.73L19.73,21 " +
+                "21,19.73l-9,-9L4.27,3z M12,4L9.91,6.09 12,8.18V4z"
 
         // 胶囊收起态把手(2026-11-11 重设计):视觉细条 + 超尺寸点击热区。
         private const val COLLAPSED_HANDLE_VISUAL_WIDTH_DP = 10
