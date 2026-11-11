@@ -2186,36 +2186,36 @@ class DiminaActivity : ComponentActivity() {
                 val capsuleTopPadding = topBarInsetTop +
                     ((MenuButtonLayout.NAVIGATION_BAR_CONTENT_HEIGHT_DP - MenuButtonLayout.HEIGHT_DP) / 2).dp
 
-                // 微信语义配色:底=导航栏解析色半透明 scrim(透出导航栏,随页面
-                // navigationBarBackgroundColor 变化);图标=navigationBarTextStyle
-                // (black→深色,white→浅色,与标题同源,深浅色切换实时刷新)。
-                // 宿主显式配置过 Builder.setCapsuleBackgroundColor/setCapsuleIconColor
-                // 时优先用宿主颜色(可自带 alpha,微信默认语义停用)。remember 把
-                // compose 色值纳入 key:@ 变量解析/深浅色切换即时生效;tick 保留
-                // resume 后重读宿主配置的语义。
+                // 配色优先级:宿主显式配置(浅/深双色 setCapsuleThemeColors,按当前主题
+                // 实时选一套)> 微信语义默认值(底=导航栏解析色半透明 scrim、图标=
+                // navigationBarTextStyle)。双色配置解决「config 不可变 → 胶囊冻结在 init
+                // 那一刻」的问题:onConfigurationChanged/onResume 会 bump capsuleThemeTick,
+                // 这里按新主题重算,切深浅色胶囊当场跟。
+                val capsuleThemeDark = Dimina.getInstance().capsuleDarkOverride()
+                    ?: (ThemeResolver.currentTheme(this@DiminaActivity) == ThemeResolver.DARK)
+                val hostCapsuleColors = Dimina.getInstance().takeIf { it.hasExplicitCapsuleColors() }
+                    ?.capsuleColors(capsuleThemeDark)
                 val capsuleBg = remember(
                     capsuleThemeTick.intValue,
                     navBarBgColor,
                     navigationBarTextColor.value,
+                    capsuleThemeDark,
                 ) {
                     Color(
-                        CapsuleStyle.backgroundColor(
-                            navBarColor = navBarBgColor.toArgb(),
-                            explicit = Dimina.getInstance().takeIf { it.hasExplicitCapsuleColors() }
-                                ?.getCapsuleBackgroundColor(),
-                        )
+                        hostCapsuleColors?.first
+                            ?: CapsuleStyle.backgroundColor(navBarColor = navBarBgColor.toArgb())
                     )
                 }
                 val capsuleFg = remember(
                     capsuleThemeTick.intValue,
                     navigationBarTextColor.value,
+                    capsuleThemeDark,
                 ) {
                     Color(
-                        CapsuleStyle.iconColor(
-                            textStyleWhite = navigationBarTextColor.value == Color.White,
-                            explicit = Dimina.getInstance().takeIf { it.hasExplicitCapsuleColors() }
-                                ?.getCapsuleIconColor(),
-                        )
+                        hostCapsuleColors?.second
+                            ?: CapsuleStyle.iconColor(
+                                textStyleWhite = navigationBarTextColor.value == Color.White,
+                            )
                     )
                 }
                 // Header 右侧通知入口:宿主通过 Dimina.setNotifyEntry 打开,从未调用则不渲染。
@@ -2244,13 +2244,11 @@ class DiminaActivity : ComponentActivity() {
                 // 收起后不再自动展开(旧「6s 空闲定时器」已删,2026-11-11):收起即保持隐藏,
                 // 唯一的展开入口是下方贴边把手的点击热区。滑动/静置都不会再把胶囊召唤出来。
                 if (capsuleCollapsed.value) {
-                    // 收起态:贴边发丝细条(2026-11-11 重设计,取代旧「半透明方块+黑描边+两点」)。
-                    // 视觉 = 10×32dp 细条:与胶囊同高(MenuButtonLayout.HEIGHT_DP)、同一垂直锚点,
-                    // 颜色 = 图标色 @ COLLAPSED_HANDLE_VISUAL_ALPHA(随 navigationBarTextStyle 自
-                    // 适应,深浅色页面都可见);无底、无描边。
-                    // 热区 = 87×56dp(宽=胶囊 footprint 同宽,高=视觉上下各外扩 12dp),
-                    // 从屏幕右缘向内延伸,手指不用精确瞄准细条
-                    // (2026-11-11 用户反馈「宽度不够」后:热区宽度直接对齐胶囊宽)。
+                    // 收起态(2026-11-12 定稿):贴边半透明圆角块 + 反色竖杠 + 超尺寸热区。
+                    // 块 = 12×32dp(与胶囊同高、同一垂直锚点),图标色 @ COLLAPSED_HANDLE_VISUAL_ALPHA;
+                    // 块里居中一根 3×22dp 反色竖杠 —— 块和页面导航栏同色时会整块「糊没」
+                    // (深色宿主+浅色页面 / 浅色宿主+深色页面),反色竖杠保证任何底色上都能
+                    // 看到「这里还有个东西」,点它展开胶囊。
                     Box(
                         modifier = Modifier
                             .align(Alignment.TopEnd)
@@ -2277,7 +2275,19 @@ class DiminaActivity : ComponentActivity() {
                                         bottomStart = (COLLAPSED_HANDLE_VISUAL_WIDTH_DP / 2).dp,
                                     ),
                                 ),
-                        )
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .width(COLLAPSED_HANDLE_BAR_WIDTH_DP.dp)
+                                    .height(COLLAPSED_HANDLE_BAR_HEIGHT_DP.dp)
+                                    .background(
+                                        Color(CapsuleStyle.inverseIconColor(capsuleFg.toArgb()))
+                                            .copy(alpha = COLLAPSED_HANDLE_BAR_ALPHA),
+                                        RoundedCornerShape((COLLAPSED_HANDLE_BAR_WIDTH_DP / 2).dp),
+                                    ),
+                            )
+                        }
                     }
                 } else {
                     // 静音钮(2026-11-12):仅展开态渲染 → 收起时随胶囊一起隐藏;
@@ -3211,11 +3221,16 @@ class DiminaActivity : ComponentActivity() {
                 "-0.42,2.48z M4.27,3L3,4.27 7.73,9H3v6h4l5,5v-6.73l4.73,4.73L19.73,21 " +
                 "21,19.73l-9,-9L4.27,3z M12,4L9.91,6.09 12,8.18V4z"
 
-        // 胶囊收起态把手(2026-11-11 重设计):视觉细条 + 超尺寸点击热区。
-        private const val COLLAPSED_HANDLE_VISUAL_WIDTH_DP = 10
+        // 胶囊收起态把手(2026-11-12 定稿):半透明圆角块 + 反色竖杠 + 超尺寸点击热区。
+        private const val COLLAPSED_HANDLE_VISUAL_WIDTH_DP = 12
 
-        /** 收起态细条不透明度:图标色 @ alpha,深浅色页面都安静可见。 */
+        /** 收起态块体不透明度:图标色 @ alpha,深浅色页面都安静可见。 */
         private const val COLLAPSED_HANDLE_VISUAL_ALPHA = 0.35f
+
+        /** 块里反色竖杠的宽/高/不透明度:块与页面同色时靠它提示「这里还有东西」。 */
+        private const val COLLAPSED_HANDLE_BAR_WIDTH_DP = 3
+        private const val COLLAPSED_HANDLE_BAR_HEIGHT_DP = 22
+        private const val COLLAPSED_HANDLE_BAR_ALPHA = 0.95f
 
         /** 收起态热区宽 = 胶囊 footprint 同宽(87dp):用户反馈「宽度不够」后对齐胶囊宽。 */
         private const val COLLAPSED_HANDLE_HIT_WIDTH_DP = MenuButtonLayout.WIDTH_DP

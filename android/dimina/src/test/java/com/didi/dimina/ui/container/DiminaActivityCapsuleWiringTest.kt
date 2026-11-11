@@ -156,21 +156,44 @@ class DiminaActivityCapsuleWiringTest {
     }
 
     @Test
-    fun `collapsed handle is capsule-height hairline with oversized hit area`() {
+    fun `collapsed handle is a translucent block with an inverse bar`() {
         assertTrue(
-            "visual bar height must equal the capsule height (MenuButtonLayout.HEIGHT_DP)",
+            "the handle block height must equal the capsule height (MenuButtonLayout.HEIGHT_DP)",
             activitySource.contains("height = MenuButtonLayout.HEIGHT_DP.dp"),
         )
         assertTrue(
-            "the hairline width/alpha/hit-area must be named constants (COLLAPSED_HANDLE_*)",
-            activitySource.contains("COLLAPSED_HANDLE_VISUAL_WIDTH_DP") &&
-                activitySource.contains("COLLAPSED_HANDLE_VISUAL_ALPHA") &&
-                activitySource.contains("COLLAPSED_HANDLE_HIT_WIDTH_DP") &&
-                activitySource.contains("COLLAPSED_HANDLE_HIT_OVERHANG_DP"),
+            "the handle geometry must come from named constants (COLLAPSED_HANDLE_*)",
+            listOf(
+                "COLLAPSED_HANDLE_VISUAL_WIDTH_DP",
+                "COLLAPSED_HANDLE_VISUAL_ALPHA",
+                "COLLAPSED_HANDLE_BAR_WIDTH_DP",
+                "COLLAPSED_HANDLE_BAR_HEIGHT_DP",
+                "COLLAPSED_HANDLE_BAR_ALPHA",
+                "COLLAPSED_HANDLE_HIT_WIDTH_DP",
+                "COLLAPSED_HANDLE_HIT_OVERHANG_DP",
+            ).all(activitySource::contains),
+        )
+        assertTrue(
+            "the inner bar must be the inverse of the capsule icon color so it stays visible " +
+                "when the translucent block blends into the page nav bar",
+            activitySource.contains("CapsuleStyle.inverseIconColor(capsuleFg.toArgb())"),
         )
         assertFalse(
             "the old bordered pill (fixed black 0x33000000 border) must not come back",
             activitySource.contains("0x33000000"),
         )
     }
+
+    @Test
+    fun `host theme colors adapt at runtime`() {
+        assertTrue(
+            "the builder must expose a light/dark capsule color pair API",
+            diminaSource.contains("fun setCapsuleThemeColors("),
+        )
+        assertTrue(
+            "the activity must resolve host capsule colors by the current theme",
+            activitySource.contains("capsuleColors(capsuleThemeDark)"),
+        )
+    }
+
 }

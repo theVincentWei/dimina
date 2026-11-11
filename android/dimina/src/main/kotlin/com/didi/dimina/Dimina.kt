@@ -83,6 +83,13 @@ class Dimina private constructor(context: Context) {
         @ColorInt val capsuleBackgroundColor: Int = builder.capsuleBackgroundColor
         @ColorInt val capsuleIconColor: Int = builder.capsuleIconColor
 
+        // 浅/深双色(可选):宿主按主题给两套胶囊配色,运行中按当前主题实时选一套。
+        // 旧单色 API 没有这两组值时回落为那一套固定色。
+        @ColorInt val capsuleLightBackgroundColor: Int? = builder.capsuleLightBackgroundColor
+        @ColorInt val capsuleLightIconColor: Int? = builder.capsuleLightIconColor
+        @ColorInt val capsuleDarkBackgroundColor: Int? = builder.capsuleDarkBackgroundColor
+        @ColorInt val capsuleDarkIconColor: Int? = builder.capsuleDarkIconColor
+
         /** 宿主是否显式设置过胶囊颜色;false=容器按微信语义自适应(CapsuleStyle)。 */
         val capsuleColorsExplicit: Boolean = builder.capsuleColorsExplicit
         val enableMultiTask: Boolean = builder.enableMultiTask
@@ -126,6 +133,35 @@ class Dimina private constructor(context: Context) {
              *  显式配置后图标色固定用该值(不再随 navigationBarTextStyle 自适应)。 */
             fun setCapsuleIconColor(@ColorInt color: Int): Builder {
                 capsuleIconColor = color
+                capsuleColorsExplicit = true
+                return this
+            }
+
+            @ColorInt internal var capsuleLightBackgroundColor: Int? = null
+                private set
+            @ColorInt internal var capsuleLightIconColor: Int? = null
+                private set
+            @ColorInt internal var capsuleDarkBackgroundColor: Int? = null
+                private set
+            @ColorInt internal var capsuleDarkIconColor: Int? = null
+                private set
+
+            /**
+             * 按主题给两套胶囊配色(浅色/深色)。Configure before [Dimina.init].
+             * 容器在运行中按当前系统深浅色选对应一套:切主题胶囊当场跟随,不用重启进程;
+             * 旧单色 API 的 config 初始化后不可变,胶囊会冻结在 init 那一刻的配色
+             * (运行中切主题不动、重启后忽然变——宿主实测的「时对时不对」)。
+             */
+            fun setCapsuleThemeColors(
+                @ColorInt lightBackgroundColor: Int,
+                @ColorInt lightIconColor: Int,
+                @ColorInt darkBackgroundColor: Int,
+                @ColorInt darkIconColor: Int,
+            ): Builder {
+                capsuleLightBackgroundColor = lightBackgroundColor
+                capsuleLightIconColor = lightIconColor
+                capsuleDarkBackgroundColor = darkBackgroundColor
+                capsuleDarkIconColor = darkIconColor
                 capsuleColorsExplicit = true
                 return this
             }
@@ -300,6 +336,7 @@ class Dimina private constructor(context: Context) {
     /** 运行时标记胶囊主题深浅(菜单等面板配色跟它走)。胶囊本体配色不再由该方法决定:
      *  默认=导航栏解析色半透明 scrim + 图标随 navigationBarTextStyle 自适应(微信语义,
      *  对所有小程序一致,与是否声明 darkmode 无关);仅当宿主通过 Builder 显式配置过
+     *  setCapsuleThemeColors(浅/深双色,按当前主题实时选)或旧的单色
      *  setCapsuleBackgroundColor/setCapsuleIconColor 时才使用宿主颜色。 */
     fun updateCapsuleTheme(dark: Boolean) {
         capsuleDarkOverride = dark
@@ -316,6 +353,23 @@ class Dimina private constructor(context: Context) {
 
     @ColorInt
     internal fun getCapsuleIconColor(): Int = config.capsuleIconColor
+
+    /**
+     * 宿主显式配置的胶囊配色(background to icon),按当前主题选一套;
+     * null = 宿主未显式配置,走微信语义(CapsuleStyle)。
+     * 新 [DiminaConfig.Builder.setCapsuleThemeColors] 提供浅/深两套,主题切换时容器
+     * 重读;旧单色 API 没有双色,浅/深都回落到那一个值(行为与之前一致)。
+     */
+    internal fun capsuleColors(dark: Boolean): Pair<Int, Int>? {
+        if (!config.capsuleColorsExplicit) return null
+        return if (dark) {
+            (config.capsuleDarkBackgroundColor ?: config.capsuleBackgroundColor) to
+                (config.capsuleDarkIconColor ?: config.capsuleIconColor)
+        } else {
+            (config.capsuleLightBackgroundColor ?: config.capsuleBackgroundColor) to
+                (config.capsuleLightIconColor ?: config.capsuleIconColor)
+        }
+    }
 
     /** 宿主是否显式配置过胶囊颜色;false=走微信默认语义(CapsuleStyle)。 */
     internal fun hasExplicitCapsuleColors(): Boolean = config.capsuleColorsExplicit

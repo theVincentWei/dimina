@@ -57,6 +57,16 @@ class CapsuleStyleTest {
     }
 
     @Test
+    fun `inverse icon color flips light and dark`() {
+        val white = 0xFFFFFFFF.toInt()
+        val dark = 0xFF1F1F1F.toInt()
+        assertEquals(dark, CapsuleStyle.inverseIconColor(white))
+        assertEquals(white, CapsuleStyle.inverseIconColor(dark))
+        // 宿主自定义的浅色图标也应反成深色(按加权亮度,不只看纯白)
+        assertEquals(dark, CapsuleStyle.inverseIconColor(0xFFF2E9D8.toInt()))
+    }
+
+    @Test
     fun `scrim alpha stays within the wechat 60-75 percent band`() {
         assert(CapsuleStyle.NAV_BAR_SCRIM_ALPHA in 0.60f..0.75f) {
             "scrim alpha ${CapsuleStyle.NAV_BAR_SCRIM_ALPHA} must stay in the WeChat 60-75% band"
