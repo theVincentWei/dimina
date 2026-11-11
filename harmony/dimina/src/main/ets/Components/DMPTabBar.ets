@@ -16,7 +16,7 @@ export struct DMPTabBarItemView {
 
   build() {
     Stack() {
-      Column({ space: 2 }) {
+      Column({ space: 3 }) {
         // Icon
         if (this.isSelected && this.item.selectedIconPath) {
           Image(this.item.selectedIconPath)
@@ -36,6 +36,8 @@ export struct DMPTabBarItemView {
         // Text
         Text(this.item.text)
           .fontSize(10)
+          // 显式行高：默认行盒比字形高，会把图标顶到上边框（贴住白线）
+          .lineHeight(12)
           .fontColor(this.isSelected ? this.selectedColor : this.color)
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -85,7 +87,9 @@ export struct DMPTabBar {
   onTabSelected?: (index: number) => void;
 
   private getBorderColor(): string {
-    return this.tabBarConfig.borderStyle === 'white' ? '#FFFFFF' : '#E0E0E0';
+    // 微信原生 TabBar 的上边框是低对比发丝线（浅色下实测 #DEDEE0 ≈ 10% 黑）。
+    // 原来写死不透明 #FFFFFF / #E0E0E0，深色 tabBar 上会变成一条刺眼白线。
+    return this.tabBarConfig.borderStyle === 'white' ? '#29FFFFFF' : '#1A000000';
   }
 
   private getBackgroundColor(): string {

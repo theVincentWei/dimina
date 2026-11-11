@@ -1881,7 +1881,9 @@ export class MiniApp {
 	}
 
 	_getTabBarBorderColor(borderStyle?: string): string {
-		return borderStyle === 'white' ? '#ffffff' : '#e0e0e0'
+		// 与三端原生同值：微信原生 TabBar 的上边框是低对比发丝线，
+		// 不透明 #fff / #e0e0e0 在深色 tabBar 上会变成一条刺眼白线。
+		return borderStyle === 'white' ? 'rgba(255, 255, 255, 0.16)' : 'rgba(0, 0, 0, 0.10)'
 	}
 
 	/**

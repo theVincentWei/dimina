@@ -352,13 +352,20 @@ private final class DMPTabBarView: UIView {
         fatalError("init(coder:) has not been implemented")
     }
 
+    /// 微信原生 TabBar 的上边框是低对比发丝线：浅色下实测 #DEDEE0（白底上约 10% 黑）。
+    /// 原来写死不透明 .white / #E0E0E0，在深色 tabBar 上会变成一条横贯全屏的白线。
+    static func borderColor(for borderStyle: String) -> UIColor {
+        if borderStyle == "white" {
+            return UIColor.white.withAlphaComponent(0.16)
+        }
+        return UIColor.black.withAlphaComponent(0.10)
+    }
+
     private func setup() {
         backgroundColor = DMPUtil.colorFromHexString(config.backgroundColor) ?? .white
 
         borderView.translatesAutoresizingMaskIntoConstraints = false
-        borderView.backgroundColor = config.borderStyle == "white"
-            ? .white
-            : UIColor(red: 224 / 255, green: 224 / 255, blue: 224 / 255, alpha: 1)
+        borderView.backgroundColor = Self.borderColor(for: config.borderStyle)
 
         stackView.translatesAutoresizingMaskIntoConstraints = false
         stackView.axis = .horizontal
@@ -405,9 +412,7 @@ private final class DMPTabBarView: UIView {
     func updateStyle(config: DMPTabBarConfig) {
         self.config = config
         backgroundColor = DMPUtil.colorFromHexString(config.backgroundColor) ?? .white
-        borderView.backgroundColor = config.borderStyle == "white"
-            ? .white
-            : UIColor(red: 224 / 255, green: 224 / 255, blue: 224 / 255, alpha: 1)
+        borderView.backgroundColor = Self.borderColor(for: config.borderStyle)
 
         let normalColor = DMPUtil.colorFromHexString(config.color) ?? UIColor(white: 0.6, alpha: 1)
         let selectedColor = DMPUtil.colorFromHexString(config.selectedColor) ?? .systemBlue
@@ -482,7 +487,7 @@ private final class DMPTabBarItemControl: UIControl {
         stackView.translatesAutoresizingMaskIntoConstraints = false
         stackView.axis = .vertical
         stackView.alignment = .center
-        stackView.spacing = 2
+        stackView.spacing = 3
         stackView.isUserInteractionEnabled = false
 
         imageView.contentMode = .scaleAspectFit

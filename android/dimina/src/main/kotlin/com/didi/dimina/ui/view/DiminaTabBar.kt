@@ -50,7 +50,14 @@ fun DiminaTabBar(
     }
 
     val backgroundColor = parseComposeColor(tabBarConfig.backgroundColor, Color.White)
-    val borderColor = if (tabBarConfig.borderStyle == "white") Color.White else Color(0xFFE0E0E0)
+    // 微信语义的 tabBar 上边框是 0.5px 低对比发丝线：white 是压到很低对比的白，
+    // black 是近黑的细线。原来写死不透明 #FFFFFF / #E0E0E0：深色皮肤里 borderStyle
+    // 取 white 时会变成一条横贯全屏的刺眼白线，取 black 时 #E0E0E0 同样发亮。
+    val borderColor = if (tabBarConfig.borderStyle == "white") {
+        Color.White.copy(alpha = BORDER_ALPHA_WHITE)
+    } else {
+        Color.Black.copy(alpha = BORDER_ALPHA_BLACK)
+    }
 
     Column(
         modifier = modifier
@@ -134,12 +141,17 @@ private fun DiminaTabBarItem(
                 Spacer(modifier = Modifier.size(24.dp))
             }
 
-            Spacer(modifier = Modifier.height(2.dp))
+            Spacer(modifier = Modifier.height(3.dp))
 
             Text(
                 text = item.text,
                 color = textColor,
                 fontSize = 10.sp,
+                // 不写 lineHeight 会继承 Material3 正文的 ~24sp 行盒：24dp 图标 + 3dp
+                // + 24dp 行盒远超 49dp 的行高，内容被顶到上边框——图标几乎贴住白线、
+                // 上下留白不对称（真机实测白线到图标只有 0.8dp）。显式行高后整块
+                // ≈39dp，在 49dp 行里居中，白线到图标 ≈5dp，与微信原生 TabBar 一致。
+                lineHeight = 12.sp,
                 maxLines = 1,
                 textAlign = TextAlign.Center,
                 overflow = TextOverflow.Ellipsis,
@@ -173,6 +185,14 @@ private fun DiminaTabBarItem(
         }
     }
 }
+
+/**
+ * 上边框发丝线的透明度。微信原生 TabBar 的上边框在浅色下实测是 #DEDEE0（白底上
+ * 相当于约 13% 的黑），深色下用 white 时同样是低对比的一线提亮；不透明 #FFFFFF /
+ * #E0E0E0 会把它画成一条横贯全屏的白线。
+ */
+private const val BORDER_ALPHA_WHITE = 0.16f
+private const val BORDER_ALPHA_BLACK = 0.10f
 
 private fun parseComposeColor(value: String, fallback: Color): Color {
     return try {
