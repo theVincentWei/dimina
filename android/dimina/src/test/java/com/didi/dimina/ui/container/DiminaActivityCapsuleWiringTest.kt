@@ -16,7 +16,11 @@ import java.io.File
  *   from navigationBarTextStyle (real-time on theme flips, darkmode declared or not);
  * - host-explicit capsule colors (Builder setters) keep the highest priority;
  * - updateCapsuleTheme no longer carries solid capsule colors (menu panels only);
- * - the touch contract (menu / close / collapse) is untouched.
+ * - the touch contract (menu / close / collapse) is untouched;
+ * - the collapsed handle NEVER auto-expands (the 6s idle timer was removed on 2026-11-11:
+ *   collapsing keeps the capsule hidden until the user taps the edge handle);
+ * - the collapsed handle is a capsule-height hairline bar with an oversized hit area
+ *   (44×48dp, Android minimum touch target), no background pill, no border.
  *
  * Assertions read the source text, same rationale as [DiminaActivityThemeWiringTest].
  */
@@ -133,6 +137,40 @@ class DiminaActivityCapsuleWiringTest {
         assertTrue(
             "collapsed handle must still expand on tap",
             activitySource.contains("clickable { capsuleCollapsed.value = false }"),
+        )
+    }
+
+    @Test
+    fun `collapsed handle never auto-expands`() {
+        assertFalse(
+            "the 6s idle auto-expand timer must stay deleted - collapsing keeps the capsule " +
+                "hidden until the user taps the edge handle",
+            activitySource.contains("delay(6000"),
+        )
+        val expandTriggers =
+            Regex("capsuleCollapsed\\.value\\s*=\\s*false").findAll(activitySource).count()
+        assertTrue(
+            "the ONLY expand trigger must be the handle tap (got $expandTriggers)",
+            expandTriggers == 1,
+        )
+    }
+
+    @Test
+    fun `collapsed handle is capsule-height hairline with oversized hit area`() {
+        assertTrue(
+            "visual bar height must equal the capsule height (MenuButtonLayout.HEIGHT_DP)",
+            activitySource.contains("height = MenuButtonLayout.HEIGHT_DP.dp"),
+        )
+        assertTrue(
+            "the hairline width/alpha/hit-area must be named constants (COLLAPSED_HANDLE_*)",
+            activitySource.contains("COLLAPSED_HANDLE_VISUAL_WIDTH_DP") &&
+                activitySource.contains("COLLAPSED_HANDLE_VISUAL_ALPHA") &&
+                activitySource.contains("COLLAPSED_HANDLE_HIT_WIDTH_DP") &&
+                activitySource.contains("COLLAPSED_HANDLE_HIT_OVERHANG_DP"),
+        )
+        assertFalse(
+            "the old bordered pill (fixed black 0x33000000 border) must not come back",
+            activitySource.contains("0x33000000"),
         )
     }
 }

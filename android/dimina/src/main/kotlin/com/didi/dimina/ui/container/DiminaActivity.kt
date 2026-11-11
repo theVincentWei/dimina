@@ -151,7 +151,6 @@ import com.didi.dimina.ui.view.ScanCodeLauncher
 import com.didi.dimina.ui.view.WebViewCacheManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -2209,43 +2208,42 @@ class DiminaActivity : ComponentActivity() {
                             .zIndex(10f)
                     )
                 }
-                // 收起后 6s 空闲自动展开(契约式隐藏)。
-                LaunchedEffect(capsuleCollapsed.value) {
-                    if (capsuleCollapsed.value) {
-                        delay(6000)
-                        capsuleCollapsed.value = false
-                    }
-                }
+                // 收起后不再自动展开(旧「6s 空闲定时器」已删,2026-11-11):收起即保持隐藏,
+                // 唯一的展开入口是下方贴边把手的点击热区。滑动/静置都不会再把胶囊召唤出来。
                 if (capsuleCollapsed.value) {
-                    // 收起态:贴边小把手,点击展开。
+                    // 收起态:贴边发丝细条(2026-11-11 重设计,取代旧「半透明方块+黑描边+两点」)。
+                    // 视觉 = 5×32dp 细条:与胶囊同高(MenuButtonLayout.HEIGHT_DP)、同一垂直锚点,
+                    // 颜色 = 图标色 @ COLLAPSED_HANDLE_VISUAL_ALPHA(随 navigationBarTextStyle 自
+                    // 适应,深浅色页面都可见);无底、无描边。
+                    // 热区 = 44×48dp(视觉上下各外扩 8dp,满足 Android 48dp 最小可点标准),
+                    // 从屏幕右缘向内延伸,手指不用精确瞄准细条。
                     Box(
                         modifier = Modifier
                             .align(Alignment.TopEnd)
-                            .padding(top = capsuleTopPadding)
                             .zIndex(10f)
-                            .size(width = 18.dp, height = 40.dp)
-                            .clip(
-                                RoundedCornerShape(
-                                    topStart = 20.dp, bottomStart = 20.dp, topEnd = 0.dp, bottomEnd = 0.dp
-                                )
+                            .padding(top = capsuleTopPadding - COLLAPSED_HANDLE_HIT_OVERHANG_DP.dp)
+                            .size(
+                                width = COLLAPSED_HANDLE_HIT_WIDTH_DP.dp,
+                                height =
+                                    (MenuButtonLayout.HEIGHT_DP + 2 * COLLAPSED_HANDLE_HIT_OVERHANG_DP).dp,
                             )
-                            .background(capsuleBg)
-                            .border(BorderStroke(0.5.dp, Color(0x33000000)), RoundedCornerShape(20.dp))
                             .clickable { capsuleCollapsed.value = false },
-                        contentAlignment = Alignment.Center
+                        contentAlignment = Alignment.CenterEnd,
                     ) {
-                        Canvas(modifier = Modifier.size(width = 6.dp, height = 18.dp)) {
-                            drawCircle(
-                                color = capsuleFg,
-                                radius = 2.5.dp.toPx(),
-                                center = Offset(size.width / 2, size.height * 0.32f),
-                            )
-                            drawCircle(
-                                color = capsuleFg,
-                                radius = 2.5.dp.toPx(),
-                                center = Offset(size.width / 2, size.height * 0.68f),
-                            )
-                        }
+                        Box(
+                            modifier = Modifier
+                                .size(
+                                    width = COLLAPSED_HANDLE_VISUAL_WIDTH_DP.dp,
+                                    height = MenuButtonLayout.HEIGHT_DP.dp,
+                                )
+                                .background(
+                                    capsuleFg.copy(alpha = COLLAPSED_HANDLE_VISUAL_ALPHA),
+                                    RoundedCornerShape(
+                                        topStart = (COLLAPSED_HANDLE_VISUAL_WIDTH_DP / 2).dp,
+                                        bottomStart = (COLLAPSED_HANDLE_VISUAL_WIDTH_DP / 2).dp,
+                                    ),
+                                ),
+                        )
                     }
                 } else {
                     MiniProgramCapsuleButton(
@@ -3068,6 +3066,19 @@ class DiminaActivity : ComponentActivity() {
         // Header 通知入口:铃铛热区尺寸与它到胶囊左缘的间距(§6.3)。
         private const val NOTIFY_ENTRY_SIZE_DP = 32
         private const val NOTIFY_ENTRY_GAP_DP = 8
+
+        // 胶囊收起态把手(2026-11-11 重设计):视觉细条 + 超尺寸点击热区。
+        private const val COLLAPSED_HANDLE_VISUAL_WIDTH_DP = 5
+
+        /** 收起态细条不透明度:图标色 @ alpha,深浅色页面都安静可见。 */
+        private const val COLLAPSED_HANDLE_VISUAL_ALPHA = 0.35f
+
+        /** 收起态热区宽:从屏幕右缘向内,远大于视觉宽,点哪都能展开。 */
+        private const val COLLAPSED_HANDLE_HIT_WIDTH_DP = 44
+
+        /** 热区垂直外扩:32dp 视觉上下各扩 8dp → 48dp,满足 Android 最小可点标准。 */
+        private const val COLLAPSED_HANDLE_HIT_OVERHANG_DP = 8
+
         private val hostSession = java.util.UUID.randomUUID().toString()
         private var hostGeneration = 0L
         private val pendingLaunches = mutableSetOf<String>()
