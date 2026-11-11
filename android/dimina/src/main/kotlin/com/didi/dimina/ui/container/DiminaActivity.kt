@@ -166,7 +166,14 @@ import kotlin.math.sin
  */
 class DiminaActivity : ComponentActivity() {
     private val tag = "DiminaActivity"
+    // 首屏启动遮罩:root 页 domReady 才关(300ms 淡出)。壳布局不再依赖它——
+    // 旧实现顶栏/tabBar/胶囊也等 domReady,页面内容先以全屏无壳状态画出、
+    // 外壳再瞬间弹入,Scaffold 重测量导致整页抖一下(「小程序页面老抖」根因)。
     private val isLoading = mutableStateOf(true)
+    // 壳就绪:页面配置解析并应用后即 true(setInitialStyle 末尾置位,覆盖
+    // initialize 首开/updatePath/onNewIntent 复用三条路径),顶栏/tabBar/胶囊
+    // 据此从配置期就位,先于 WebView 首帧,消除外壳弹入的整页位移。
+    private val shellReady = mutableStateOf(false)
     private var suspendedForMiniProgramNavigation = false
 
     // UI state for navigation bar
@@ -616,6 +623,7 @@ class DiminaActivity : ComponentActivity() {
                     DiminaContent(
                         miniProgram = miniProgram,
                         isLoading = isLoading,
+                        shellReady = shellReady,
                         modifier = Modifier
                             .background(pageBackgroundColor)
                             .padding(
@@ -859,6 +867,11 @@ class DiminaActivity : ComponentActivity() {
         reapplyThemeStyles()
         // 页面身份变化时 JS 侧看到的 systemInfo 快照也会随之刷新,推主题的必要性重新记账
         lastPushedJsTheme = currentJsTheme()
+        // 壳就绪放在最后:此时 backgroundColor 已按主题解析为页面配置底色,
+        // 壳就位瞬间内容区即页面底色,不存在默认白中间帧。setInitialStyle 被
+        // initialize(首开)/updatePath(redirect)/onNewIntent(复用)三条路径共用,
+        // 幂等置 true,后两条路径 shellReady 已为 true 不触发额外重组。
+        shellReady.value = true
     }
 
     /**
@@ -1781,7 +1794,8 @@ class DiminaActivity : ComponentActivity() {
     }
 
     fun onDomReady() {
-        // 6.隐藏加载动画
+        // 6.关闭首屏启动遮罩(壳布局已随 shellReady 在配置期就位,这里不再牵动壳;
+        // root 页遮罩以 300ms 淡出退场,非 root 页无遮罩)
         LogUtils.d(
             tag,
             "Mini program initialization complete, hiding loading indicator"
@@ -1884,6 +1898,7 @@ class DiminaActivity : ComponentActivity() {
     fun DiminaContent(
         miniProgram: MiniProgram,
         isLoading: State<Boolean>,
+        shellReady: State<Boolean>,
         modifier: Modifier = Modifier,
     ) {
         if (showActionSheet.value) {
@@ -1941,7 +1956,9 @@ class DiminaActivity : ComponentActivity() {
         val navBarBgColor = parseCssColor(navigationBarBackgroundColor.value)
         val isCustomNavigation = !showNavigationBar.value
         val tabBarConfig = tabBarConfigState.value
-        val shouldShowTabBar = !isLoading.value &&
+        // 壳门控用 shellReady(配置就绪),不用 isLoading(domReady):tabBar 若等
+        // domReady 才出现,内容 Box 会在首帧渲染后被压矮一截,整页上收抖动。
+        val shouldShowTabBar = shellReady.value &&
             tabBarConfig != null &&
             tabBarVisible.value &&
             getTabBarIndex(currentPagePath.value) >= 0
@@ -1954,8 +1971,9 @@ class DiminaActivity : ComponentActivity() {
         Box(modifier = modifier.fillMaxSize()) {
             Scaffold(
                 topBar = {
-                    // Only show the navigation bar when not loading and showNavigationBar is true
-                    if (!isLoading.value && showNavigationBar.value) {
+                    // 顶栏随 shellReady(配置就绪)在首帧前就位;若等 domReady,
+                    // 内容先全屏画出、顶栏弹入时把内容整体下推,Scaffold 重测即整页抖动。
+                    if (shellReady.value && showNavigationBar.value) {
                         CenterAlignedTopAppBar(
                             title = {
                                 Text(
@@ -2111,7 +2129,7 @@ class DiminaActivity : ComponentActivity() {
                 )
             }
 
-            if (!isLoading.value && com.didi.dimina.Dimina.getInstance().shouldShowCapsule()) {
+            if (shellReady.value && com.didi.dimina.Dimina.getInstance().shouldShowCapsule()) {
                 val configuration = LocalConfiguration.current
                 val (windowInfo, menuRect) = remember(
                     configuration.screenWidthDp,
