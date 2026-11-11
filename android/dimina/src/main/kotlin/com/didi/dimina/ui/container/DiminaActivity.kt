@@ -760,16 +760,23 @@ class DiminaActivity : ComponentActivity() {
                     // 框架升级确认:上次运行下载好的 pending 新包还在 → 本次启动前弹窗问
                     // 用户;确认则先激活再继续(下面的配置读取直接拿到新包),拒绝则照旧
                     // 跑当前版本。升级决策完全在框架侧,小程序不参与。
+                    // autoSync 包(miniProgram.autoUpdate)例外:跳过弹窗直接激活,
+                    // 确认语义由服务端 bundle.json 的 autoSync 字段表达。
                     val pending = RemoteUpdateManager.peekPendingUpdate(applicationContext, appId)
-                    if (pending != null && pending.versionCode > VersionUtils.getAppVersion(appId) &&
-                        !miniApp.isUpdateDeclined(appId, pending.versionCode)
-                    ) {
-                        val decision = askPendingUpdateDecision(pending.versionCode, pending.versionName)
-                        if (decision == true && RemoteUpdateManager.activatePendingUpdate(applicationContext, appId)) {
-                            miniProgram = miniProgram.copy(versionCode = pending.versionCode)
-                            MiniApp.getInstance().notifyUpdateApplied(appId, pending.versionCode, pending.versionName)
-                        } else if (decision == false) {
-                            miniApp.recordUpdateDeclined(appId, pending.versionCode)
+                    if (pending != null && pending.versionCode > VersionUtils.getAppVersion(appId)) {
+                        if (miniProgram.autoUpdate) {
+                            if (RemoteUpdateManager.activatePendingUpdate(applicationContext, appId)) {
+                                miniProgram = miniProgram.copy(versionCode = pending.versionCode)
+                                MiniApp.getInstance().notifyUpdateApplied(appId, pending.versionCode, pending.versionName)
+                            }
+                        } else if (!miniApp.isUpdateDeclined(appId, pending.versionCode)) {
+                            val decision = askPendingUpdateDecision(pending.versionCode, pending.versionName)
+                            if (decision == true && RemoteUpdateManager.activatePendingUpdate(applicationContext, appId)) {
+                                miniProgram = miniProgram.copy(versionCode = pending.versionCode)
+                                MiniApp.getInstance().notifyUpdateApplied(appId, pending.versionCode, pending.versionName)
+                            } else if (decision == false) {
+                                miniApp.recordUpdateDeclined(appId, pending.versionCode)
+                            }
                         }
                     }
                 }
@@ -3227,6 +3234,19 @@ class DiminaActivity : ComponentActivity() {
         internal fun promptPendingUpdateFromHost(appId: String, versionCode: Int, versionName: String): Boolean {
             val activity = activityRegistry.lastRegistered(appId) ?: return false
             activity.promptPendingUpdate(versionCode, versionName)
+            return true
+        }
+
+        /**
+         * autoSync 静默升级的宿主入口(autoSync 扩展):新包就绪且小程序正在运行时
+         * 由 MiniApp 在主线程调用,直接走 [DiminaActivity.applyUpdate](激活+冷重启,
+         * 与用户确认路径同一套,无弹窗)。返回 false = 该小程序没有在运行的 Activity,
+         * 调用方应自行激活 pending(下次打开即新版本)。
+         */
+        @androidx.annotation.MainThread
+        internal fun autoApplyPendingUpdateFromHost(appId: String): Boolean {
+            val activity = activityRegistry.lastRegistered(appId) ?: return false
+            activity.applyUpdate()
             return true
         }
 

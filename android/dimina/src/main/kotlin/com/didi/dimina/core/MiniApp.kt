@@ -50,6 +50,7 @@ import com.didi.dimina.ui.container.DiminaActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
 
@@ -252,9 +253,43 @@ class MiniApp private constructor() {
             RemoteUpdateManager.checkForUpdate(
                 context = context.applicationContext,
                 miniProgram = miniProgram,
-                notify = { event -> onRemoteUpdateEvent(context.applicationContext, miniProgram.appId, event) },
+                notify = { event -> onRemoteUpdateEvent(context.applicationContext, miniProgram, event) },
                 operationToken = operationToken,
             )
+        }
+    }
+
+    /**
+     * autoSync 静默同步的后台执行体(autoSync 扩展):调 [RemoteUpdateManager.syncPackage]
+     * 把新包装进本机,全程不弹确认。installed/applied 里程碑照常广播给宿主
+     * 监听器(与用户打开链路同一套事件);结果回给调用方(容器插件层)。
+     * callback 在主线程回调。
+     */
+    fun syncInBackground(
+        context: Context,
+        miniProgram: MiniProgram,
+        done: (RemoteUpdateManager.SyncResult) -> Unit,
+    ) {
+        CoroutineScope(Dispatchers.IO).launch {
+            val result = try {
+                val r = RemoteUpdateManager.syncPackage(context.applicationContext, miniProgram)
+                when (r.outcome) {
+                    "installed" -> {
+                        notifyInstalled(miniProgram.appId, r.versionCode, r.versionName)
+                        r
+                    }
+                    "updated" -> {
+                        notifyUpdateApplied(miniProgram.appId, r.versionCode, r.versionName)
+                        r
+                    }
+                    else -> r
+                }
+            } catch (t: Throwable) {
+                LogUtils.e(tag, "autoSync sync failed: ${t.message}")
+                notifyUpdateFailed(miniProgram.appId, t.message)
+                RemoteUpdateManager.SyncResult("failed", 0, t.message ?: "")
+            }
+            withContext(Dispatchers.Main) { done(result) }
         }
     }
 
@@ -262,14 +297,27 @@ class MiniApp private constructor() {
      * 后台检查结果统一出口。JS 总线事件保留(wx.getUpdateManager 向后兼容),同时走
      * 框架链路:新包就绪 → 通知宿主监听器;若小程序正在运行,由容器弹窗问用户,确认后
      * applyUpdate 换包冷重启。升级决策完全在框架侧,小程序不参与。
+     * autoSync 包(miniProgram.autoUpdate)例外:跳过弹窗直接激活——确认语义由
+     * 服务端 bundle.json 的 autoSync 字段表达。
      */
-    private fun onRemoteUpdateEvent(context: Context, appId: String, event: String) {
+    private fun onRemoteUpdateEvent(context: Context, miniProgram: MiniProgram, event: String) {
+        val appId = miniProgram.appId
         postUpdateStatus(appId, event)
         when (event) {
             RemoteUpdateManager.EVENT_UPDATE_READY -> {
                 val pending = RemoteUpdateManager.peekPendingUpdate(context, appId) ?: return
                 notifyUpdateReady(appId, pending.versionCode, pending.versionName)
-                if (!isUpdateDeclined(appId, pending.versionCode)) {
+                if (miniProgram.autoUpdate) {
+                    updateMainHandler.post {
+                        // 在跑 → 容器激活+冷重启(与用户确认路径同一套 applyUpdate);
+                        // 没在跑 → 这里直接激活 pending,下次打开即新版本。
+                        if (!DiminaActivity.autoApplyPendingUpdateFromHost(appId)) {
+                            if (RemoteUpdateManager.activatePendingUpdate(context, appId)) {
+                                notifyUpdateApplied(appId, pending.versionCode, pending.versionName)
+                            }
+                        }
+                    }
+                } else if (!isUpdateDeclined(appId, pending.versionCode)) {
                     updateMainHandler.post {
                         DiminaActivity.promptPendingUpdateFromHost(appId, pending.versionCode, pending.versionName)
                     }

@@ -143,6 +143,56 @@ object RemoteUpdateManager {
         }
     }
 
+    /** autoSync 静默同步的结果(outcome: installed / updated / noupdate / failed)。 */
+    data class SyncResult(val outcome: String, val versionCode: Int, val versionName: String)
+
+    /**
+     * autoSync 静默同步(autoSync 扩展):后台把 [miniProgram.updateManifestUrl]
+     * 描述的包装进本机,全程无界面、**无确认弹窗**——确认语义由服务端
+     * bundle.json 的 autoSync 字段表达,调用方是宿主的静默同步链路。
+     *
+     *   没有可运行包 → [installInitialPackage](直接进 active,"installed");
+     *   有可运行包且 manifest 版本更新 → 下载校验进 pending 并立即激活("updated");
+     *   已最新 / manifest 缺失 → "noupdate"。
+     *
+     * 抛出 IO 异常(网络/校验失败);里程碑(installed/applied)由调用方广播。
+     */
+    fun syncPackage(context: Context, miniProgram: MiniProgram): SyncResult {
+        val manifestUrl = miniProgram.updateManifestUrl.trim()
+        if (manifestUrl.isEmpty()) return SyncResult("noupdate", 0, "")
+        return lockFor(miniProgram.appId).withLock {
+            val hasRunnable = try {
+                File(jsAppRoot(context), "${miniProgram.appId}/main/logic.js").isFile
+            } catch (_: Exception) {
+                false
+            }
+            if (!hasRunnable) {
+                // 静默首装:与 open 的无底包首装同一入口(active 目录)。
+                val installed = installInitialPackage(context, miniProgram)
+                return@withLock SyncResult("installed", installed.versionCode, installed.versionName)
+            }
+            val manifest = fetchManifest(manifestUrl)
+            validateManifestAppId(manifest, miniProgram.appId)
+            val currentVersion = VersionUtils.getAppVersion(miniProgram.appId)
+            if (manifest.versionCode <= currentVersion) {
+                deletePendingPackage(context, miniProgram.appId)
+                return@withLock SyncResult("noupdate", currentVersion, "")
+            }
+            val zipFile = downloadPackage(context, manifest)
+            try {
+                installPendingPackage(context, manifest, zipFile)
+            } finally {
+                zipFile.delete()
+            }
+            // 立即激活:ReentrantLock 同线程可重入,activatePendingUpdate 的
+            // operation token 校验此时必然有效(无卸载竞争)。
+            if (!activatePendingUpdate(context, miniProgram.appId)) {
+                return@withLock SyncResult("failed", manifest.versionCode, manifest.versionName)
+            }
+            SyncResult("updated", manifest.versionCode, manifest.versionName)
+        }
+    }
+
     internal fun isPackageOperationInProgress(appId: String): Boolean = uninstallingApps.contains(appId)
 
     internal fun installLocalPackage(context: Context, appId: String, packagePath: String): JSONObject {

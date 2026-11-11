@@ -207,6 +207,23 @@ class Dimina private constructor(context: Context) {
         miniApp.openApp(context, miniProgram)
     }
 
+    /**
+     * autoSync 静默同步(autoSync 扩展):后台把 [miniProgram.updateManifestUrl]
+     * 描述的包装进本机,全程无界面、无确认弹窗。没装 → 首装;已装旧版 → 下载
+     * 并立即激活;已最新 → noupdate。installed/applied 里程碑照常经
+     * [setOnMiniProgramUpdateListener] 广播;[callback] 在主线程回调,参数为
+     * (outcome: installed|updated|noupdate|failed, versionCode, versionName)。
+     */
+    fun syncMiniProgram(
+        context: Context,
+        miniProgram: MiniProgram,
+        callback: (outcome: String, versionCode: Int, versionName: String) -> Unit,
+    ) {
+        MiniApp.getInstance().syncInBackground(context, miniProgram) { result ->
+            callback(result.outcome, result.versionCode, result.versionName)
+        }
+    }
+
     /** Hide an app while retaining its page stack and runtime for the next startMiniProgram. */
     @MainThread
     fun hideMiniProgram(appId: String): Boolean {

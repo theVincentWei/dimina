@@ -24,6 +24,10 @@ data class MiniProgram(
     /** 宿主渲染好的应用图标(桌面/市场同款字形的 PNG bytes);菜单弹层头部展示,
      *  null=回落首字母瓦片。宿主侧随主题色离屏栅格化,SDK 不做字形复刻。 */
     val iconPng: ByteArray? = null,
+    /** autoSync 静默同步(宿主万器扩展):true 时升级链路**跳过确认弹窗**,新包
+     *  就绪即激活(正在运行则冷重启)。确认语义由服务端 bundle.json 的
+     *  autoSync 字段表达,用户在发布侧就同意了;默认 false = 照旧弹窗确认。 */
+    val autoUpdate: Boolean = false,
 ) : Parcelable {
 
     /** Keeps the original public seven-argument JVM constructor binary-compatible. */
@@ -47,6 +51,7 @@ data class MiniProgram(
         openerAppId = null,
         referrerExtraData = null,
         envVersion = "release",
+        iconPng = null,
     )
 
     constructor(parcel: Parcel) : this(
@@ -62,6 +67,7 @@ data class MiniProgram(
         referrerExtraData = parcel.readString(),
         envVersion = parcel.readString() ?: "release",
         iconPng = parcel.createByteArray(),
+        autoUpdate = parcel.readInt() == 1,
     )
 
     override fun writeToParcel(parcel: Parcel, flags: Int) {
@@ -77,6 +83,7 @@ data class MiniProgram(
         parcel.writeString(referrerExtraData)
         parcel.writeString(envVersion)
         parcel.writeByteArray(iconPng)
+        parcel.writeInt(if (autoUpdate) 1 else 0)
     }
 
     // 描述内容，通常返回 0
