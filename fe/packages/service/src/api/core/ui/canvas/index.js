@@ -54,6 +54,14 @@ export function drawCanvas(opts = {}) {
  */
 export function canvasToTempFilePath(opts = {}, component) {
 	const params = canvasApiParams(opts, component)
+	// 小游戏语义：wx.canvasToTempFilePath({ canvas }) 直接传 wx.createCanvas() 返回的
+	// 节点对象。节点实例携带内部状态（Map/回调表/操作队列，且可能成环），不能进
+	// JSON 桥；游戏上屏画布也没有 canvas-id DOM 属性，渲染层按节点 id 解析。
+	// 这里把节点折叠成 canvasId 再下发，显式传了 canvasId 的以调用方为准。
+	if (params.canvas?.__diminaCanvasNode === true && typeof params.canvas.nodeId === 'string') {
+		if (params.canvasId === undefined) params.canvasId = params.canvas.nodeId
+		delete params.canvas
+	}
 	delete params.pixelRatio
 	const pixelRatio = Number(hostEnv.getSystemInfo()?.pixelRatio)
 	if (Number.isFinite(pixelRatio) && pixelRatio > 0) {
