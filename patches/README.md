@@ -1,6 +1,7 @@
 # dimina 补丁存档总览
 
 > 2026-11-11 起为本仓(dimina fork)自带档案:原存万器仓 `patches/dimina/`,四仓减负迁入;内容与用法不变。
+> 同日新建公开 fork `theVincentWei/dimina`,main 即本地线(基线 v1.8.1)。
 
 两个子目录,两种取用方式,内容同源(均出自本 fork `main` 对上游 didi/dimina 的本地增量):
 
