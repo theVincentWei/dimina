@@ -259,6 +259,109 @@ describe('native mini game WebGL bridge', () => {
 		drainService()
 	})
 
+	it('exports the last presented frame when canvasToTempFilePath targets the game canvas node', async () => {
+		// 每张 canvas 各配一份 recording 2D context：presentation 的上屏副本与
+		// 导出内部新建的输出画布都能分别断言。
+		const twoDContexts = new Map()
+		HTMLCanvasElement.prototype.getContext.mockImplementation(function (type, attributes) {
+			if (type === '2d') {
+				if (!twoDContexts.has(this)) twoDContexts.set(this, { drawImage: vi.fn() })
+				return twoDContexts.get(this)
+			}
+			if (type !== 'webgl' && type !== 'webgl2') return null
+			const host = createHostGL(this, attributes, type)
+			contexts.push(host)
+			return host
+		})
+		const toDataURL = vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL')
+			.mockImplementation(() => 'data:image/png;base64,fake')
+		const canvas = canvasApi.createCanvas()
+		const gl = canvas.getContext('webgl')
+		const node = runtime.canvasNodes.get(canvas.nodeId)
+		const presentationCanvas = node.presentation.canvas
+		gl.clearColor(1, 0, 1, 1)
+		gl.clear(gl.COLOR_BUFFER_BIT)
+		await Promise.resolve()
+		drainRender()
+		drainService()
+		// present 已把完整帧从 GL 画布拷到上屏画布。
+		const presentationContext = twoDContexts.get(presentationCanvas)
+		expect(presentationContext.drawImage).toHaveBeenCalledTimes(1)
+		expect(presentationContext.drawImage.mock.calls[0][0]).toBe(node.canvas)
+		// GL 画布不在 DOM 里，导出只能按节点解析，不能走 canvas-id DOM 契约。
+		expect(node.canvas.isConnected).toBe(false)
+		window.DiminaRenderBridge.invoke = vi.fn()
+		await runtime.canvasToTempFilePath({
+			bridgeId,
+			params: { canvasId: canvas.nodeId, x: 0, y: 0, width: 8, height: 8 },
+		})
+		// 导出的源是持有完整帧的上屏画布，而不是 present 后已按
+		// preserveDrawingBuffer=false 清空的 GL 离屏画布。
+		const exportCalls = [...twoDContexts.entries()]
+			.flatMap(([element, context]) => context.drawImage.mock.calls.map(args => ({ element, args })))
+		const exportCall = exportCalls.find(call => call.args[0] === presentationCanvas)
+		expect(exportCall).toBeDefined()
+		const saved = window.DiminaRenderBridge.invoke.mock.calls
+			.map(([message]) => message)
+			.find(message => message.type === 'invokeAPI' && message.body?.name === 'saveCanvasTempFile')
+		expect(saved).toBeDefined()
+		expect(saved.body.bridgeId).toBe(bridgeId)
+		// 容器收到的是剥掉 dataURL 前缀的裸 base64（runtime.js 导出链路约定）。
+		expect(saved.body.params.dataURL).toBe('fake')
+		expect(saved.body.params.fileType).toBe('png')
+		expect(toDataURL).toHaveBeenCalled()
+	})
+
+	it('node toDataURL reads the presented screen canvas for WebGL game nodes', async () => {
+		const canvas = canvasApi.createCanvas()
+		const gl = canvas.getContext('webgl')
+		const node = runtime.canvasNodes.get(canvas.nodeId)
+		const presentedToDataURL = vi.fn(() => 'data:image/png;base64,PRESENTED')
+		node.presentation.canvas.toDataURL = presentedToDataURL
+		const drawingToDataURL = vi.fn(() => 'data:image/png;base64,CLEARED')
+		node.canvas.toDataURL = drawingToDataURL
+		const pending = canvas.toDataURL('image/png', 0.8)
+		await Promise.resolve()
+		drainRender()
+		drainService()
+		expect(await pending).toBe('data:image/png;base64,PRESENTED')
+		expect(presentedToDataURL).toHaveBeenCalledWith('image/png', 0.8)
+		expect(drawingToDataURL).not.toHaveBeenCalled()
+
+		// 没有 presentation 的 2D 节点仍读自身画布（上屏画布即绘制画布）。
+		const plain = canvasApi.createOffscreenCanvas({ type: '2d', width: 4, height: 4 })
+		await Promise.resolve()
+		drainRender()
+		drainService()
+		const plainNode = runtime.canvasNodes.get(plain.nodeId)
+		const plainToDataURL = vi.fn(() => 'data:image/png;base64,PLAIN')
+		plainNode.canvas.toDataURL = plainToDataURL
+		const plainPending = plain.toDataURL()
+		await Promise.resolve()
+		drainRender()
+		drainService()
+		expect(await plainPending).toBe('data:image/png;base64,PLAIN')
+		expect(plainToDataURL).toHaveBeenCalledTimes(1)
+	})
+
+	it('collapses the game canvas node into canvasId before bridging canvasToTempFilePath', async () => {
+		const canvas = canvasApi.createCanvas()
+		const gl = canvas.getContext('webgl')
+		await Promise.resolve()
+		drainRender()
+		drainService()
+		const { canvasToTempFilePath } = await import('../../service/src/api/core/ui/canvas/index.js')
+		toRender.length = 0
+		canvasToTempFilePath({ canvas })
+		await Promise.resolve()
+		const apiMessage = toRender.find(message => message.type === 'invokeAPI' && message.body?.name === 'canvasToTempFilePath')
+		expect(apiMessage).toBeDefined()
+		// 节点实例不能进 JSON 桥：折叠成 nodeId，显式 canvasId 以调用方为准。
+		expect(apiMessage.body.params.canvasId).toBe(canvas.nodeId)
+		expect(apiMessage.body.params.canvas).toBeUndefined()
+		expect(apiMessage.body.params.pixelRatio).toBeUndefined()
+	})
+
 	it.each([
 		['webgl', true], ['webgl2', true], ['webgl', false], ['webgl2', false],
 	])('preserves mixed-case ASTC enums for %s with synchronous queries %s', async (type, synchronous) => {

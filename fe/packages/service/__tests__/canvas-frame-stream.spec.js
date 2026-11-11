@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { callback } from '@dimina/common'
 import router from '../src/core/router.js'
 import { createOffscreenCanvas } from '../src/api/core/ui/canvas/index.js'
+import { createCanvas, installMiniGameGlobals, resetMiniGameCanvas } from '../src/api/core/ui/canvas/canvas-node.js'
 const key = Symbol.for('dimina.canvas.subscribeAnimationFrame'), nodes = []
 let bridgeId, serial = 0, oldInvoke, oldPublish
 function event(type, body = {}) { globalThis.DiminaServiceBridge.onMessage({ type, body }) }
@@ -127,4 +128,138 @@ it('throwing native subscriber still releases credit and can cancel once',()=>{
  const n=node(),native=displayNative();let cancel
  try{cancel=n[displayKey](()=>{throw new Error('user')});const start=nativeStart(native);expect(()=>nativeTick(start,1,1000)).toThrow('user');expect(native.mock.calls.filter(c=>c[0]===2)).toHaveLength(1);cancel();cancel();expect(native.mock.calls.filter(c=>c[0]===3)).toHaveLength(1)}
  finally{cancel?.();delete globalThis.DiminaServiceBridge.displayFrameControl}
+})
+
+// ---- 生产 rAF 路径接线：canvas.requestAnimationFrame / 注入全局走常驻帧流 ----
+it('routes the injected global rAF through the frame stream when the capability is negotiated',()=>{
+ node()
+ const previousRaf=globalThis.requestAnimationFrame,previousCancel=globalThis.cancelAnimationFrame
+ installMiniGameGlobals()
+ try{
+  createCanvas({type:'webgl'})
+  const seen=[]
+  globalThis.requestAnimationFrame(ts=>seen.push(ts))
+  expect(messages('canvasNodeSubscribeAnimationFrame')).toHaveLength(1)
+  expect(messages('canvasNodeRequestAnimationFrame')).toHaveLength(0)
+  const s=start();tick(s,1,16.7)
+  expect(seen).toEqual([16.7])
+ }
+ finally{resetMiniGameCanvas();globalThis.requestAnimationFrame=previousRaf;globalThis.cancelAnimationFrame=previousCancel}
+})
+it('dispatches each tick once to every pending rAF and keeps a re-registering loop on one subscription',()=>{
+ const n=node(),seen=[];let frames=0
+ const loop=ts=>{frames++;if(frames<4)n.requestAnimationFrame(loop)}
+ n.requestAnimationFrame(loop)
+ n.requestAnimationFrame(ts=>seen.push(['one',ts]))
+ expect(messages('canvasNodeSubscribeAnimationFrame')).toHaveLength(1)
+ const s=start();tick(s,1,17);tick(s,2,34);tick(s,3,51);tick(s,4,68)
+ expect(frames).toBe(4)
+ expect(seen).toEqual([['one',17]])
+ expect(messages('canvasNodeSubscribeAnimationFrame')).toHaveLength(1)
+ expect(n.frameSubscriptions.size).toBe(0)
+ expect(messages('canvasNodeCancelAnimationFrame').length).toBeGreaterThan(0)
+})
+it('falls back to the legacy one-shot rAF when the stream capability is absent',()=>{
+ const n=node(0)
+ const fn=vi.fn()
+ const id=n.requestAnimationFrame(fn)
+ expect(messages('canvasNodeSubscribeAnimationFrame')).toHaveLength(0)
+ const sent=messages('canvasNodeRequestAnimationFrame')
+ expect(sent).toHaveLength(1)
+ expect(sent[0].params.requestId).toBe(id)
+ callback.invoke(sent[0].params.callback,21.5)
+ expect(fn).toHaveBeenCalledWith(21.5)
+ expect(n.rafCallbacks.has(id)).toBe(false)
+})
+it('falls back to the one-shot rAF when pump creation fails and retries the stream next frame',()=>{
+ const n=node();n.flushOperations()
+ globalThis.DiminaServiceBridge.publish.mockImplementationOnce(()=>{throw new Error('closed')})
+ const fn=vi.fn()
+ n.requestAnimationFrame(fn)
+ const sent=messages('canvasNodeRequestAnimationFrame')
+ expect(sent).toHaveLength(1)
+ expect(fn).not.toHaveBeenCalled()
+ callback.invoke(sent[0].params.callback,12.5)
+ expect(fn).toHaveBeenCalledWith(12.5)
+ const again=vi.fn()
+ n.requestAnimationFrame(again)
+ const s=start();tick(s,1,25)
+ expect(again).toHaveBeenCalledWith(25)
+})
+it('cancelAnimationFrame removes only its own pending callback and unsubscribes once none remain',()=>{
+ const n=node(),a=vi.fn(),b=vi.fn()
+ const idA=n.requestAnimationFrame(a)
+ n.requestAnimationFrame(b)
+ const s=start()
+ n.cancelAnimationFrame(idA)
+ expect(a).not.toHaveBeenCalled()
+ expect(n.frameSubscriptions.size).toBe(1)
+ tick(s,1,17)
+ expect(a).not.toHaveBeenCalled()
+ expect(b).toHaveBeenCalledWith(17)
+ expect(n.frameSubscriptions.size).toBe(0)
+ expect(messages('canvasNodeCancelAnimationFrame').length).toBeGreaterThan(0)
+ tick(s,2,34)
+ expect(b).toHaveBeenCalledTimes(1)
+})
+it('cancelAnimationFrame unsubscribes the pump when the last pending rAF is cancelled',()=>{
+ const n=node(),fn=vi.fn()
+ const id=n.requestAnimationFrame(fn)
+ const s=start()
+ n.cancelAnimationFrame(id)
+ expect(fn).not.toHaveBeenCalled()
+ expect(n.frameSubscriptions.size).toBe(0)
+ expect(messages('canvasNodeCancelAnimationFrame')).toHaveLength(1)
+ tick(s,1,17)
+ expect(fn).not.toHaveBeenCalled()
+ const again=vi.fn()
+ n.requestAnimationFrame(again)
+ const next=start()
+ expect(next.requestId).not.toBe(s.requestId)
+ tick(next,1,34)
+ expect(again).toHaveBeenCalledWith(34)
+})
+it('appHide suspends the rAF pump and appShow resumes into a fresh generation',()=>{
+ const n=node(),fn=vi.fn()
+ n.requestAnimationFrame(fn)
+ const s=start()
+ event('appHide')
+ expect(messages('canvasNodeCancelAnimationFrame')).toHaveLength(1)
+ tick(s,1,17)
+ expect(fn).not.toHaveBeenCalled()
+ event('appShow')
+ const next=start()
+ expect(next.requestId).not.toBe(s.requestId)
+ tick(s,2,34)
+ expect(fn).not.toHaveBeenCalled()
+ tick(next,1,51)
+ expect(fn).toHaveBeenCalledTimes(1)
+ expect(fn).toHaveBeenCalledWith(51)
+ expect(n.frameSubscriptions.size).toBe(0)
+})
+it('dispose tears down the pump and drops pending rAFs',()=>{
+ const n=node(),fn=vi.fn(),other=vi.fn()
+ n.requestAnimationFrame(fn)
+ n.requestAnimationFrame(other)
+ const s=start()
+ n.dispose()
+ expect(n.frameSubscriptions.size).toBe(0)
+ expect(n.streamRafCallbacks.size).toBe(0)
+ tick(s,1,17)
+ expect(fn).not.toHaveBeenCalled()
+ expect(other).not.toHaveBeenCalled()
+})
+it('a throwing rAF callback does not starve other pending callbacks on the same tick',()=>{
+ const n=node(),good=vi.fn(),later=vi.fn()
+ n.requestAnimationFrame(()=>{throw new Error('user')})
+ n.requestAnimationFrame(good)
+ const s=start()
+ expect(()=>tick(s,1,17)).toThrow('user')
+ expect(good).toHaveBeenCalledWith(17)
+ expect(messages('canvasNodeAcknowledgeAnimationFrame')).toHaveLength(1)
+ n.requestAnimationFrame(later)
+ const s2=start()
+ expect(s2.requestId).not.toBe(s.requestId)
+ tick(s2,1,34)
+ expect(later).toHaveBeenCalledWith(34)
 })
