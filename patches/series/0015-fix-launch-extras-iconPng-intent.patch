@@ -1,0 +1,48 @@
+From 0f3282b21bbc16a347efd9559352420f3f407074 Mon Sep 17 00:00:00 2001
+From: Wei Mingchen <weimingchen1997@qq.com>
+Date: Tue, 10 Nov 2026 00:19:11 +0800
+Subject: [PATCH 15/25] =?UTF-8?q?fix:launch=20extras=20=E4=BC=A0=E9=80=92?=
+ =?UTF-8?q?=20iconPng=E2=80=94=E2=80=94=E5=AD=97=E6=AE=B5=E5=8C=96=20inten?=
+ =?UTF-8?q?t=20=E9=87=8D=E5=BB=BA=E9=93=BE=E6=AD=A4=E5=89=8D=E6=8A=8A?=
+ =?UTF-8?q?=E6=96=B0=E5=A2=9E=E5=AD=97=E6=AE=B5=E4=B8=A2=E5=BC=83,?=
+ =?UTF-8?q?=E5=BC=B9=E5=B1=82=E5=A4=B4=E9=83=A8=E6=8B=BF=E4=B8=8D=E5=88=B0?=
+ =?UTF-8?q?=E5=9B=BE=E6=A0=87?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .../main/kotlin/com/didi/dimina/ui/container/DiminaActivity.kt | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/android/dimina/src/main/kotlin/com/didi/dimina/ui/container/DiminaActivity.kt b/android/dimina/src/main/kotlin/com/didi/dimina/ui/container/DiminaActivity.kt
+index e09a5f0..91dffd5 100644
+--- a/android/dimina/src/main/kotlin/com/didi/dimina/ui/container/DiminaActivity.kt
++++ b/android/dimina/src/main/kotlin/com/didi/dimina/ui/container/DiminaActivity.kt
+@@ -2992,6 +2992,7 @@ class DiminaActivity : ComponentActivity() {
+         private const val EXTRA_PATH = "dimina_mp_path"
+         private const val EXTRA_VERSION_CODE = "dimina_mp_version_code"
+         private const val EXTRA_VERSION_NAME = "dimina_mp_version_name"
++        private const val EXTRA_ICON_PNG = "dimina_mp_icon_png"
+         private const val EXTRA_UPDATE_MANIFEST_URL = "dimina_mp_update_manifest_url"
+         private const val EXTRA_SCENE = "dimina_mp_scene"
+         private const val EXTRA_OPENER_APP_ID = "dimina_mp_opener_app_id"
+@@ -3036,6 +3037,7 @@ class DiminaActivity : ComponentActivity() {
+                     openerAppId = intent.getStringExtra(EXTRA_OPENER_APP_ID),
+                     referrerExtraData = intent.getStringExtra(EXTRA_REFERRER_EXTRA_DATA),
+                     envVersion = intent.getStringExtra(EXTRA_ENV_VERSION) ?: "release",
++                    iconPng = intent.getByteArrayExtra(EXTRA_ICON_PNG),
+                 )
+             }
+             // 兼容通道:宿主直接构造 Parcelable extra 的旧用法。Bundle 惰性解包下
+@@ -3175,6 +3177,7 @@ class DiminaActivity : ComponentActivity() {
+                 putExtra(EXTRA_OPENER_APP_ID, miniProgram.openerAppId)
+                 putExtra(EXTRA_REFERRER_EXTRA_DATA, miniProgram.referrerExtraData)
+                 putExtra(EXTRA_ENV_VERSION, miniProgram.envVersion)
++                putExtra(EXTRA_ICON_PNG, miniProgram.iconPng)
+                 putExtra(HOST_GENERATION_KEY, hostGeneration)
+                 putExtra(HOST_SESSION_KEY, hostSession)
+                 flag?.let {
+-- 
+2.50.1 (Apple Git-155)
+

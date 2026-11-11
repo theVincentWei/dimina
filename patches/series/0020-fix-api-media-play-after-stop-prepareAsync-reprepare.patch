@@ -1,0 +1,72 @@
+From 8a56e2f6e165fdff8f9ff062905edb21e2684e6b Mon Sep 17 00:00:00 2001
+From: Wei Mingchen <weimingchen1997@qq.com>
+Date: Tue, 10 Nov 2026 23:36:18 +0800
+Subject: [PATCH 20/25] =?UTF-8?q?fix(api/media):=20play-after-stop=20?=
+ =?UTF-8?q?=E5=A4=8D=E7=94=A8=E5=AE=9E=E4=BE=8B=20prepareAsync=20=E9=9D=99?=
+ =?UTF-8?q?=E9=BB=98=E6=8C=82=E6=AD=BB=E2=80=94=E2=80=94reprepare=20?=
+ =?UTF-8?q?=E6=94=B9=E4=B8=BA=E9=94=80=E6=AF=81=E9=87=8D=E5=BB=BA=20MediaP?=
+ =?UTF-8?q?layer=20=E5=B9=B6=E4=BD=BF=E7=94=A8=E8=A7=A3=E6=9E=90=E5=90=8E?=
+ =?UTF-8?q?=E7=BB=9D=E5=AF=B9=E8=B7=AF=E5=BE=84(API35+vivo=20=E5=AE=9E?=
+ =?UTF-8?q?=E6=B5=8B:stop/reset=20=E5=90=8E=E5=A4=8D=E7=94=A8=E5=AE=9E?=
+ =?UTF-8?q?=E4=BE=8B=E7=9A=84=20prepareAsync=20=E4=B8=8D=E5=9B=9E=E8=B0=83?=
+ =?UTF-8?q?=20onPrepared/onError,=E4=BB=85=E6=96=B0=E5=BB=BA=E5=AE=9E?=
+ =?UTF-8?q?=E4=BE=8B=E9=A6=96=E6=AC=A1=20prepare=20=E5=8F=AF=E9=9D=A0)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .../com/didi/dimina/api/media/AudioApi.kt     | 19 ++++++++++++++-----
+ 1 file changed, 14 insertions(+), 5 deletions(-)
+
+diff --git a/android/dimina/src/main/kotlin/com/didi/dimina/api/media/AudioApi.kt b/android/dimina/src/main/kotlin/com/didi/dimina/api/media/AudioApi.kt
+index ca20f8a..8b4d80d 100644
+--- a/android/dimina/src/main/kotlin/com/didi/dimina/api/media/AudioApi.kt
++++ b/android/dimina/src/main/kotlin/com/didi/dimina/api/media/AudioApi.kt
+@@ -109,6 +109,7 @@ class AudioApi : BaseApiHandler() {
+         val mainHandler = Handler(Looper.getMainLooper())
+         var player: MediaPlayer? = null
+         var src = ""
++        var resolvedSrc: String? = null
+         var autoplay = false
+         var loop = false
+         var volume = 1.0
+@@ -349,7 +350,10 @@ class AudioApi : BaseApiHandler() {
+                 if (destroyed || generation != prepareGeneration) return@post
+                 val target = player ?: MediaPlayer().also { player = it }
+                 resolved.fold(
+-                    { source -> attachAndPrepare(target, source) },
++                    { source ->
++                        resolvedSrc = source
++                        attachAndPrepare(target, source)
++                    },
+                     { failure ->
+                         paused = true
+                         emitError(
+@@ -362,14 +366,19 @@ class AudioApi : BaseApiHandler() {
+         }
+     }
+ 
+-    /** play-after-stop 的重 prepare：src 不变，直接走最后一次解析结果（无网络 IO）。 */
++    /** play-after-stop 的重 prepare：直接走最后一次解析结果（无网络 IO）。
++     *  平台特性：stop()/reset() 后复用同一 MediaPlayer 再 prepareAsync 会静默挂死
++     *  （onPrepared/onError 均不回调，API 35 实测）——必须销毁旧实例重建。 */
+     private fun InnerAudioInstance.reprepare() {
+         val generation = ++prepareGeneration
+-        val source = src
++        val source = resolvedSrc
+         mainHandler.post {
+             if (destroyed || generation != prepareGeneration) return@post
+-            val target = player ?: return@post
+-            attachAndPrepare(target, source)
++            if (source.isNullOrEmpty()) return@post
++            player?.let { runCatching { it.release() } }
++            player = null
++            val fresh = MediaPlayer().also { player = it }
++            attachAndPrepare(fresh, source)
+         }
+     }
+ 
+-- 
+2.50.1 (Apple Git-155)
+

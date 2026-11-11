@@ -1,0 +1,234 @@
+From 13cef9d9f260c2997c91b6a83771971e09b0925a Mon Sep 17 00:00:00 2001
+From: Wei Mingchen <weimingchen1997@qq.com>
+Date: Mon, 9 Nov 2026 20:00:37 +0800
+Subject: [PATCH 04/25] =?UTF-8?q?=E5=AE=B9=E5=99=A8:=E5=A3=B3=E5=B1=82?=
+ =?UTF-8?q?=E9=85=8D=E7=BD=AE=E8=89=B2=E5=8F=98=E9=87=8F=E5=8C=96(@?=
+ =?UTF-8?q?=E5=BC=95=E7=94=A8=E6=8C=89=E5=BD=93=E5=89=8D=20uiMode=20?=
+ =?UTF-8?q?=E5=AE=9E=E6=97=B6=E5=8F=96=E5=80=BC),darkmode=20=E9=97=A8?=
+ =?UTF-8?q?=E7=A6=81=E4=B8=8B=E4=B8=8E=E7=8E=B0=E7=8A=B6=E9=80=90=E5=AD=97?=
+ =?UTF-8?q?=E8=8A=82=E4=B8=80=E8=87=B4?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- bean/AppConfig.kt:App 增加 darkmode:Boolean=false 与 theme:Map<String,Map<String,String>>?=null(app 层 schema,旧包零影响)
+- ui/theme/ThemeResolver.kt(新):@key → theme[current][key] → theme[other][key] → 去@字面值;非@直通;当前主题读 uiMode NIGHT_MASK
+- DiminaActivity:setInitialStyle 记录原始配置值 → reapplyThemeStyles 统一按当前主题解析(导航栏背景/页面背景/系统导航栏/WebView 背景/状态栏字色);tab 容器后台 tab 的 WebView/NativeComponentHost 背景逐页重算;onConfigurationChanged 在胶囊主题同时机触发重算
+- 门禁 isDarkModeEnabled()=appConfig.app.darkmode,未声明包所有值原样直通;compileReleaseKotlin 验证通过
+---
+ .../kotlin/com/didi/dimina/bean/AppConfig.kt  | 11 ++-
+ .../dimina/ui/container/DiminaActivity.kt     | 71 ++++++++++++++++---
+ .../com/didi/dimina/ui/theme/ThemeResolver.kt | 58 +++++++++++++++
+ 3 files changed, 130 insertions(+), 10 deletions(-)
+ create mode 100644 android/dimina/src/main/kotlin/com/didi/dimina/ui/theme/ThemeResolver.kt
+
+diff --git a/android/dimina/src/main/kotlin/com/didi/dimina/bean/AppConfig.kt b/android/dimina/src/main/kotlin/com/didi/dimina/bean/AppConfig.kt
+index 230a04c..99b07bc 100644
+--- a/android/dimina/src/main/kotlin/com/didi/dimina/bean/AppConfig.kt
++++ b/android/dimina/src/main/kotlin/com/didi/dimina/bean/AppConfig.kt
+@@ -20,7 +20,16 @@ data class App(
+     val tabBar: TabBarConfig? = null,
+     val subPackages: List<SubPackage>? = null,
+     val networkTimeout: NetworkTimeout? = null,
+-    val debug: Boolean? = null
++    val debug: Boolean? = null,
++    /**
++     * 微信语义深色模式：app.json 声明 "darkmode": true 且编译器把 theme.json 变量表打进
++     * app.theme 后，壳层配置（window/tabBar 及页面级 window 段）的 "@key" 引用才按当前
++     * 系统主题解析。默认 false，旧包与未适配包完全走现状路径。
++     * 编译器契约：darkmode 为 true 时必有 theme；theme.json 缺失/损坏时编译器会丢弃
++     * darkmode，容器不处理「true 但无表」的半配置状态。
++     */
++    val darkmode: Boolean = false,
++    val theme: Map<String, Map<String, String>>? = null
+ )
+ 
+ @Serializable
+diff --git a/android/dimina/src/main/kotlin/com/didi/dimina/ui/container/DiminaActivity.kt b/android/dimina/src/main/kotlin/com/didi/dimina/ui/container/DiminaActivity.kt
+index 467b7a3..f318ec4 100644
+--- a/android/dimina/src/main/kotlin/com/didi/dimina/ui/container/DiminaActivity.kt
++++ b/android/dimina/src/main/kotlin/com/didi/dimina/ui/container/DiminaActivity.kt
+@@ -127,6 +127,7 @@ import com.didi.dimina.core.MiniApp
+ import com.didi.dimina.core.PageStateTeardown
+ import com.didi.dimina.core.RemoteUpdateManager
+ import com.didi.dimina.ui.theme.DiminaAndroidTheme
++import com.didi.dimina.ui.theme.ThemeResolver
+ import com.didi.dimina.ui.view.ActionSheet
+ import com.didi.dimina.ui.view.ContactPicker
+ import com.didi.dimina.ui.view.DiminaTabBar
+@@ -175,6 +176,12 @@ class DiminaActivity : ComponentActivity() {
+     private val useTabBarContainer = mutableStateOf(false)
+     private val loadedTabIndices = mutableStateOf<Set<Int>>(emptySet())
+ 
++    // 深色模式:壳层样式的原始配置值(可能带 "@key" 引用)。setInitialStyle 记录原始值,
++    // 主题切换时 reapplyThemeStyles 按新主题重新解析这组值;null 表示尚未应用过页面样式。
++    private var rawNavigationBarBackgroundColor: String? = null
++    private var rawBackgroundColor: String? = null
++    private var rawNavigationBarTextStyle: String? = null
++
+     // State for ActionSheet
+     private val showActionSheet = mutableStateOf(false)
+     private val showMiniProgramMenu = mutableStateOf(false)
+@@ -858,17 +865,58 @@ class DiminaActivity : ComponentActivity() {
+         // Set navigation bar title
+         navigationBarTitle.value = config.navigationBarTitleText
+ 
+-        // Set navigation bar background color
+-        navigationBarBackgroundColor.value = config.navigationBarBackgroundColor
++        // 记录原始配置值(可能带 "@key" 引用),再按当前主题解析应用;
++        // 主题切换时 onConfigurationChanged 会对同一组原始值重算。
++        rawNavigationBarBackgroundColor = config.navigationBarBackgroundColor
++        rawBackgroundColor = config.backgroundColor
++        rawNavigationBarTextStyle = config.navigationBarTextStyle
++        reapplyThemeStyles()
++    }
++
++    /**
++     * darkmode 门禁:仅 app.json 声明 "darkmode": true 的小程序解析 "@key" 引用;
++     * 其余包所有配置值原样直通,行为与现状完全一致。
++     */
++    private fun isDarkModeEnabled(): Boolean {
++        return ::appConfig.isInitialized && appConfig.app.darkmode
++    }
++
++    /** 按当前系统主题解析一个壳层配置值(未声明 darkmode 时原样返回)。 */
++    private fun resolveThemeValue(value: String): String {
++        if (!isDarkModeEnabled()) {
++            return value
++        }
++        return ThemeResolver.resolve(ThemeResolver.currentTheme(this), appConfig.app.theme, value)
++    }
++
++    /**
++     * 按当前主题重新解析壳层颜色并应用到全部应用点。
++     * setInitialStyle(进入/切换页面)与 onConfigurationChanged(系统深浅色变化)共用:
++     * 导航栏与页面背景是 Compose state,reset 即触发重组;系统导航栏与 WebView 背景
++     * 没有重组机制,这里手动重调。
++     */
++    private fun reapplyThemeStyles() {
++        val rawNavBg = rawNavigationBarBackgroundColor ?: return
++        val rawPageBg = rawBackgroundColor ?: return
++        val rawTextStyle = rawNavigationBarTextStyle ?: return
+ 
+-        // Set page background color
+-        backgroundColor.value = config.backgroundColor
++        navigationBarBackgroundColor.value = resolveThemeValue(rawNavBg)
++        backgroundColor.value = resolveThemeValue(rawPageBg)
+ 
+-        updateSystemNavigationBarColor(config.backgroundColor)
+-        updateWebViewBackgroundColor(config.backgroundColor)
++        updateSystemNavigationBarColor(backgroundColor.value)
++        updateWebViewBackgroundColor(backgroundColor.value)
++
++        // 多 tab 场景:后台 tab 的 WebView/组件宿主也按各自页面配置刷新,切回时不残留旧色
++        if (useTabBarContainer.value) {
++            tabPageStates.values.forEach { state ->
++                val argb = parseCssColor(resolveThemeValue(state.configInfo.backgroundColor)).toArgb()
++                state.webView?.setBackgroundColor(argb)
++                state.nativeComponentHost?.updatePageBackgroundColor(argb)
++            }
++        }
+ 
+         // Update status bar style based on text style
+-        this.updateActionColorStyle(config.navigationBarTextStyle)
++        updateActionColorStyle(resolveThemeValue(rawTextStyle))
+     }
+ 
+     private fun parseCssColor(value: String, fallback: Color = Color.White): Color {
+@@ -1492,7 +1540,7 @@ class DiminaActivity : ComponentActivity() {
+         }
+         val state = tabPageStates[index] ?: return
+         state.webView = webView
+-        webView.setBackgroundColor(parseCssColor(state.configInfo.backgroundColor).toArgb())
++        webView.setBackgroundColor(parseCssColor(resolveThemeValue(state.configInfo.backgroundColor)).toArgb())
+         if (index == selectedTabIndex.intValue) {
+             this.webView = webView
+         }
+@@ -1576,7 +1624,7 @@ class DiminaActivity : ComponentActivity() {
+         val overlay = state.nativeOverlay ?: return
+         state.nativeComponentHost = NativeComponentHost(this, currentWebView, overlay) { message ->
+             bridgeForWebView(currentWebView)?.handleEmbeddedWebViewMessage(message)
+-        }.also { it.updatePageBackgroundColor(parseCssColor(state.configInfo.backgroundColor).toArgb()) }
++        }.also { it.updatePageBackgroundColor(parseCssColor(resolveThemeValue(state.configInfo.backgroundColor)).toArgb()) }
+         if (index == selectedTabIndex.intValue) {
+             nativeComponentHost = state.nativeComponentHost
+         }
+@@ -1710,6 +1758,11 @@ class DiminaActivity : ComponentActivity() {
+             android.content.res.Configuration.UI_MODE_NIGHT_YES
+         Dimina.getInstance().updateCapsuleTheme(dark)
+         capsuleThemeTick.intValue++
++        // 壳层颜色(导航栏背景/页面背景/系统导航栏/WebView 背景/状态栏字色)按新主题重算:
++        // 此时 resources.configuration 已是新值,resolveThemeValue 取到的即新主题。
++        if (rawNavigationBarBackgroundColor != null) {
++            reapplyThemeStyles()
++        }
+     }
+ 
+     override fun onResume() {
+diff --git a/android/dimina/src/main/kotlin/com/didi/dimina/ui/theme/ThemeResolver.kt b/android/dimina/src/main/kotlin/com/didi/dimina/ui/theme/ThemeResolver.kt
+new file mode 100644
+index 0000000..44cfe43
+--- /dev/null
++++ b/android/dimina/src/main/kotlin/com/didi/dimina/ui/theme/ThemeResolver.kt
+@@ -0,0 +1,58 @@
++package com.didi.dimina.ui.theme
++
++import android.content.Context
++import android.content.res.Configuration
++
++/**
++ * 微信语义的深色模式取值器。
++ *
++ * 小程序在 app.json 声明 "darkmode": true 后（编译器把 theme.json 的两套变量表打进
++ * app-config.json 的 app.theme），壳层配置值允许用 "@key" 引用变量，容器按当前系统
++ * 深浅色解析。回退链与微信一致：
++ *
++ *   "@key" -> theme[当前主题][key] -> theme[另一主题][key] -> 去掉 @ 的字面值
++ *
++ * 非 "@" 值原样返回，因此未声明 darkmode 的包所有配置值都走直通路径，行为与
++ * 不开启深色模式时完全一致。调用方（DiminaActivity）负责 darkmode 门禁。
++ */
++object ThemeResolver {
++
++    /** 主题变量表的两层键,超出集合的顶层键在 lookup 时自然被忽略。 */
++    const val LIGHT = "light"
++    const val DARK = "dark"
++
++    /**
++     * 当前主题。读 resources.configuration.uiMode 的 NIGHT_MASK：
++     * UI_MODE_NIGHT_YES 记 dark，其余（NOT_YES / UNDEFINED）一律记 light，
++     * 与微信「未声明 = 永远浅色」的兜底方向一致。
++     */
++    fun currentTheme(context: Context): String {
++        val mask = context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK
++        return if (mask == Configuration.UI_MODE_NIGHT_YES) DARK else LIGHT
++    }
++
++    fun otherTheme(theme: String): String = if (theme == DARK) LIGHT else DARK
++
++    /**
++     * 解析一个壳层配置值。
++     * @param current 当前主题（[ThemeResolver.currentTheme] 的结果）
++     * @param theme app-config.json 的 theme 变量表，null/空表时 "@key" 直接回退字面值
++     * @param value 原始配置值，可带 "@key" 引用
++     */
++    fun resolve(
++        current: String,
++        theme: Map<String, Map<String, String>>?,
++        value: String
++    ): String {
++        if (!value.startsWith("@")) {
++            return value
++        }
++        val key = value.substring(1)
++        if (theme == null) {
++            return key
++        }
++        theme[current]?.get(key)?.let { return it }
++        theme[otherTheme(current)]?.get(key)?.let { return it }
++        return key
++    }
++}
+-- 
+2.50.1 (Apple Git-155)
+

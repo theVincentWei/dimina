@@ -1,0 +1,156 @@
+From bbc30c78d5eae642764881b203d61a575628a35f Mon Sep 17 00:00:00 2001
+From: Wei Mingchen <weimingchen1997@qq.com>
+Date: Wed, 11 Nov 2026 01:38:42 +0800
+Subject: [PATCH 23/25] =?UTF-8?q?test:=20redirectTo=20=E4=BA=8B=E4=BB=B6?=
+ =?UTF-8?q?=E9=93=BE=E8=B7=AF=E5=9B=9E=E5=BD=92=E7=94=A8=E4=BE=8B=EF=BC=88?=
+ =?UTF-8?q?fe=20vitest=EF=BC=89+=20=E8=AE=BE=E5=A4=87=E5=86=92=E7=83=9F?=
+ =?UTF-8?q?=E8=84=9A=E6=9C=AC?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- fe/packages/service/__tests__/redirect-lifecycle.spec.js：按修复后容器的
+  redirectTo 序列（pageUnload 旧桥 + 全新桥 loadResource）驱动 service 运行时，
+  锁死三条不变式：旧页 onUnload、新页实例入栈、换页后 onRetry/onStats 可路由。
+- scripts/smoke-redirect.sh：设备侧冒烟——监听 logcat 窗口，断言 fresh-bridge
+  重建出现、tap 事件送达 service、无 NO invoke handler / 无 service invoke 丢弃。
+---
+ .../__tests__/redirect-lifecycle.spec.js      | 73 +++++++++++++++++++
+ scripts/smoke-redirect.sh                     | 45 ++++++++++++
+ 2 files changed, 118 insertions(+)
+ create mode 100644 fe/packages/service/__tests__/redirect-lifecycle.spec.js
+ create mode 100755 scripts/smoke-redirect.sh
+
+diff --git a/fe/packages/service/__tests__/redirect-lifecycle.spec.js b/fe/packages/service/__tests__/redirect-lifecycle.spec.js
+new file mode 100644
+index 0000000..6990ba5
+--- /dev/null
++++ b/fe/packages/service/__tests__/redirect-lifecycle.spec.js
+@@ -0,0 +1,73 @@
++import { modDefine } from '@dimina/common'
++import { describe, expect, it, vi } from 'vitest'
++import '../src/core/env'
++import runtime from '../src/core/runtime'
++// 导入 service 单例：init() 会接管 DiminaServiceBridge.onMessage（桥桩已在 test-setup 就位）
++import '../src/index.js'
++
++// 回归背景（2026-11-11，双拼教练结果页按钮失效）：
++// 容器 redirectTo 换页在修复前复用旧桥（updatePath destroy(true)+init(false)），
++// 渲染层事件链静默死亡；容器修复后换页序列 = pageUnload(旧桥) + loadResource(全新桥、
++// 新 resourceLoadId)。本用例按修复后的容器行为驱动 service 运行时，锁死三条不变式：
++//   1. redirectTo 后旧页面 onUnload 必须执行；
++//   2. 新页面实例必须创建并进入路由栈（moduleId 与旧页不同）；
++//   3. 换页后页内 tap（onRetry/onStats）必须路由到新页面实例。
++// 容器 Kotlin 侧（invokeFromJS 兜底分发 + messageInvoke service 信任）由设备冒烟
++// 脚本覆盖，本用例只守 fe 运行时。
++describe('redirectTo lifecycle (result page taps alive after redirect)', () => {
++	it('routes taps to the redirected page and unloads the previous page', async () => {
++		const trace = []
++		globalThis.DiminaServiceBridge.publish = () => {}
++		globalThis.DiminaServiceBridge.invoke = vi.fn(() => null)
++
++		modDefine('app', () => {
++			globalThis.__extraInfo = { path: 'app', usingComponents: {} }
++			globalThis.App({ onLaunch() {} })
++		})
++		modDefine('pages/practice/practice', () => {
++			globalThis.__extraInfo = { path: 'pages/practice/practice', usingComponents: {} }
++			globalThis.Page({
++				data: {},
++				onLoad() { trace.push('practice.onLoad') },
++				onUnload() { trace.push('practice.onUnload') },
++			})
++		})
++		modDefine('pages/result/result', () => {
++			globalThis.__extraInfo = { path: 'pages/result/result', usingComponents: {} }
++			globalThis.Page({
++				data: {},
++				onLoad() { trace.push('result.onLoad') },
++				onRetry() { trace.push('result.onRetry') },
++				onStats() { trace.push('result.onStats') },
++			})
++		})
++
++		const drive = (type, body) => globalThis.DiminaServiceBridge.onMessage({ type, body })
++
++		// Phase 1: 首屏 practice（navigateTo 进入，桥 bridge_P）
++		drive('loadResource', { appId: 'wx', bridgeId: 'bridge_P', pagePath: 'pages/practice/practice', query: {}, resourceLoadId: 'r1', runtimeType: 'miniProgram' })
++		drive('resourceLoaded', { bridgeId: 'bridge_P', pagePath: 'pages/practice/practice', resourceLoadId: 'r1' })
++		const practicePage = runtime.createInstance({ bridgeId: 'bridge_P', moduleId: 'page_p1', path: 'pages/practice/practice', query: {}, stackId: 'stack_main' })
++		expect(practicePage).toBeTruthy()
++		await Promise.resolve()
++		expect(trace).toContain('practice.onLoad')
++
++		// Phase 2: 修复后容器的 redirectTo 序列（pageUnload 旧桥 → 全新桥 loadResource → 新页实例）
++		drive('pageUnload', { bridgeId: 'bridge_P' })
++		drive('loadResource', { appId: 'wx', bridgeId: 'bridge_R', pagePath: 'pages/result/result', query: { id: 'na' }, resourceLoadId: 'r2', runtimeType: 'miniProgram' })
++		drive('resourceLoaded', { bridgeId: 'bridge_R', pagePath: 'pages/result/result', resourceLoadId: 'r2' })
++		const resultPage = runtime.createInstance({ bridgeId: 'bridge_R', moduleId: 'page_r1', path: 'pages/result/result', query: { id: 'na' }, stackId: 'stack_main' })
++		expect(resultPage).toBeTruthy()
++		expect(resultPage).not.toBe(practicePage)
++		await Promise.resolve()
++		expect(trace).toContain('practice.onUnload')
++		expect(trace).toContain('result.onLoad')
++
++		// Phase 3: 换页后页内 tap 必须路由到新页面实例
++		drive('t', { bridgeId: 'bridge_R', moduleId: 'page_r1', methodName: 'onRetry', event: { type: 'tap' } })
++		drive('t', { bridgeId: 'bridge_R', moduleId: 'page_r1', methodName: 'onStats', event: { type: 'tap' } })
++		await Promise.resolve()
++		expect(trace).toContain('result.onRetry')
++		expect(trace).toContain('result.onStats')
++	})
++})
+diff --git a/scripts/smoke-redirect.sh b/scripts/smoke-redirect.sh
+new file mode 100755
+index 0000000..dce03c2
+--- /dev/null
++++ b/scripts/smoke-redirect.sh
+@@ -0,0 +1,45 @@
++#!/usr/bin/env bash
++# smoke-redirect.sh — Dimina redirectTo 事件链路设备冒烟（2026-11-11 断链事故回归守卫）
++#
++# 背景：updatePath 原位复用旧桥导致 redirectTo 换页后页内 tap 的 render→service
++# 链路静默死亡（三层：桥不重建 / invoke 分发按页 id 找不到桥回调 / messageInvoke
++# bridgeId 守卫误拦）。三层修复后的信号：
++#   ✓ 换页出现 "starting fresh bridge (redirectTo)"
++#   ✓ tap 后 service 收到事件（DiminaRenderBridge publish 带 methodName）
++#   ✗ 不得出现 "NO invoke handler" / "DROP msg from service (bridgeId mismatch)"
++#
++# 用法：在一个终端跑本脚本，然后（同一设备上）人工或 adb 驱动任一小程序走一次
++# redirectTo 并点击页内按钮；窗口期结束输出 PASS/FAIL。
++#   ./scripts/smoke-redirect.sh [SERIAL] [窗口秒数=60]
++#
++# 依赖：adb 在 PATH（或 ANDROID_ADB 环境变量指定）；设备已装含本修复的 dsh-go。
++set -euo pipefail
++
++SERIAL=${1:-}
++WINDOW=${2:-60}
++ADB="${ANDROID_ADB:-adb}"
++[ -n "$SERIAL" ] && ADB="$ADB -s $SERIAL"
++
++echo "[smoke] watching logcat for ${WINDOW}s — 现在去触发一次 redirectTo 并点击页内按钮…"
++
++TMP=$(mktemp)
++"$ADB" logcat -c
++"$ADB" logcat -v time >"$TMP" &
++LOGPID=$!
++trap 'kill $LOGPID 2>/dev/null || true' EXIT
++sleep "$WINDOW"
++kill $LOGPID 2>/dev/null || true
++
++FRESH=$(grep -c "starting fresh bridge (redirectTo)" "$TMP" || true)
++TAPS=$(grep -cE '"methodName":"(on[A-Z])[^\"]*"' "$TMP" || true)
++NOHANDLER=$(grep -c "NO invoke handler" "$TMP" || true)
++DROPPED=$(grep -c "DROP msg from service" "$TMP" || true)
++
++echo "[smoke] fresh-bridge redirects: $FRESH | service taps delivered: $TAPS | unhandled invokes: $NOHANDLER | dropped service invokes: $DROPPED"
++
++if [ "$FRESH" -ge 1 ] && [ "$TAPS" -ge 1 ] && [ "$NOHANDLER" -eq 0 ] && [ "$DROPPED" -eq 0 ]; then
++	echo "[smoke] PASS"
++	exit 0
++fi
++echo "[smoke] FAIL — 见上方计数与 $TMP 完整日志"
++exit 1
+-- 
+2.50.1 (Apple Git-155)
+

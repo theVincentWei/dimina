@@ -1,0 +1,100 @@
+From 54829ef6a94ab59d43ab6e54df51ddf9eca70172 Mon Sep 17 00:00:00 2001
+From: Wei Mingchen <weimingchen1997@qq.com>
+Date: Wed, 11 Nov 2026 00:46:19 +0800
+Subject: [PATCH 21/25] =?UTF-8?q?fix(container):=20redirectTo=20=E6=8D=A2?=
+ =?UTF-8?q?=E9=A1=B5=E9=87=8D=E5=BB=BA=E5=85=A8=E6=96=B0=20Bridge=E2=80=94?=
+ =?UTF-8?q?=E2=80=94=E4=BF=AE=E5=A4=8D=20redirect=20=E5=90=8E=E9=A1=B5?=
+ =?UTF-8?q?=E9=9D=A2=20bindtap=20=E5=85=A8=E9=83=A8=E5=A4=B1=E6=95=88?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+updatePath 旧实现 destroy(true)+init(false) 原位复用 Bridge/WebView：不重挂
+addJavascriptInterface、不重注册 jscore 回调、canvasChannel 不重建，reload 后
+render→container 事件链静默死亡，新页面所有 bindtap 永久失效（真机实证：
+双拼教练结果页按钮点不动；navigateTo/switchTab/首次加载均正常，仅 redirectTo 特异）。
+
+改为与 navigateTo/首次加载一致的已验证路径：removeBridge + destroy(false) 完整
+销毁旧桥 → createBridge/init(true) 重建全新桥（旧 WebView 复用，重挂注入接口幂等；
+新桥=新 bridgeId 无回调冲突）。tab 容器分支走 onTabWebViewReady 既有重建路径。
+options 除路径/根目录/页面配置外逐字段克隆旧桥（isRoot/scene/referrerInfo 语义不变）。
+
+实证：jsdom 跑真机同款 pageFrame.js/service.js redirectTo 全序列+tap 派发 PASS
+（fe 侧无罪），探针在 default-workspace/dimina-redirect-probe/。
+---
+ .../dimina/ui/container/DiminaActivity.kt     | 57 +++++++++++++------
+ 1 file changed, 39 insertions(+), 18 deletions(-)
+
+diff --git a/android/dimina/src/main/kotlin/com/didi/dimina/ui/container/DiminaActivity.kt b/android/dimina/src/main/kotlin/com/didi/dimina/ui/container/DiminaActivity.kt
+index 91dffd5..2d65920 100644
+--- a/android/dimina/src/main/kotlin/com/didi/dimina/ui/container/DiminaActivity.kt
++++ b/android/dimina/src/main/kotlin/com/didi/dimina/ui/container/DiminaActivity.kt
+@@ -2952,26 +2952,47 @@ class DiminaActivity : ComponentActivity() {
+                     state.homeButtonHidden.value = false
+                 }
+ 
+-                currentBridge.destroy(true)
+-                // 更新当前 bridge 的配置
+-                currentBridge.updateOptions(
+-                    pathInfo = pathInfo,
+-                    root = pageConfig?.root ?: "main",
+-                    configInfo = mergedPageConfig
+-                )
+-                currentBridge.init(false)
++                // redirectTo 修复（2026-11-11）：旧实现 destroy(true)+init(false) 原位复用
++                // Bridge/WebView，跳过 addJavascriptInterface 重挂、jscore 回调重注册与
++                // canvasChannel 重建——reload 后 render→container 事件链静默死亡，新页面
++                // 所有 bindtap 永久失效（真机实证；navigateTo=新 Activity 全新桥、
++                // switchTab=独立桥完整 init 均正常）。改走与首次加载完全一致的已验证
++                // 路径：完整销毁旧桥 → createBridge/init(true) 重建全新桥（旧 WebView
++                // 复用，重挂注入接口幂等；新桥=新 bridgeId 无回调冲突）。
++                miniApp.removeBridge(miniProgram.appId, currentBridge)
++                currentBridge.destroy(false)
++
+                 if (activeTabState != null && activeTabIndex >= 0) {
+-                    withTabWebViewPageLoaded(activeTabIndex) {
+-                        if (!activeTabState.bridgeStarted) {
+-                            LogUtils.d(tag, "Tab page loaded, restarting bridge: index=$activeTabIndex")
+-                            activeTabState.bridgeStarted = true
+-                            currentBridge.start()
+-                        }
+-                    }
++                    // tab 容器：置空桥状态，走 onTabWebViewReady 既有重建路径
++                    // （bridge==null 即全量 createBridge，start 仍由 pageLoaded 门控）
++                    activeTabState.bridge = null
++                    activeTabState.webView?.let { onTabWebViewReady(activeTabIndex, it) }
+                 } else {
+-                    withWebViewPageLoaded {
+-                        LogUtils.d(tag, "Page loaded, restarting bridge")
+-                        currentBridge.start()
++                    // 非 tab 页：克隆旧桥 options（保留 isRoot/scene/referrerInfo 等语义，
++                    // 仅替换路径/根目录/页面配置），与 navigateTo 同款全量建桥
++                    withWebView { webView ->
++                        val freshBridge = createBridge(
++                            BridgeOptions(
++                                pathInfo = pathInfo,
++                                scene = currentBridge.options.scene,
++                                jscore = currentBridge.options.jscore,
++                                webview = webView,
++                                isRoot = currentBridge.options.isRoot,
++                                root = pageConfig?.root ?: "main",
++                                appId = currentBridge.options.appId,
++                                runtimeType = currentBridge.options.runtimeType,
++                                pages = currentBridge.options.pages,
++                                configInfo = mergedPageConfig,
++                                referrerInfo = currentBridge.options.referrerInfo,
++                            )
++                        )
++                        // Add bridge to MiniApp's bridge list for this appId
++                        miniApp.addBridge(miniProgram.appId, freshBridge)
++
++                        withWebViewPageLoaded {
++                            LogUtils.d(tag, "Page loaded, starting fresh bridge (redirectTo)")
++                            freshBridge.start()
++                        }
+                     }
+                 }
+             }
+-- 
+2.50.1 (Apple Git-155)
+

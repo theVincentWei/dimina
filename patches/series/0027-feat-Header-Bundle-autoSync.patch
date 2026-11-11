@@ -1,0 +1,669 @@
+From ed162349d0945e6f8722404d12e4832e046301e6 Mon Sep 17 00:00:00 2001
+From: Wei Mingchen <weimingchen1997@qq.com>
+Date: Wed, 11 Nov 2026 12:08:52 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E5=AE=B9=E5=99=A8=20Header=20=E9=80=9A?=
+ =?UTF-8?q?=E7=9F=A5=E9=93=83=E9=93=9B=E5=85=A5=E5=8F=A3=20+=20=E5=89=8D?=
+ =?UTF-8?q?=E7=AB=AF=20Bundle=20=E5=8D=87=E7=BA=A7=E5=BC=BA=E5=88=B6?=
+ =?UTF-8?q?=E8=87=AA=E5=8A=A8(=E4=B8=8E=20autoSync=20=E5=90=88=E6=B5=81)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+在 7c8a3af(autoSync)之上重新合入通知工作(此前 c0d76f6 用旧基线文件误覆盖
+了 autoSync 的容器改动,本提交以三方合并恢复并叠加):
+
+- Header 右侧胶囊左边通知铃铛(Canvas 手绘,红点角标 99+ 封顶):Dimina 新增
+  setNotifyEntry/setNotifyUnread/setOnNotifyEntryClick 三方法,宿主不调用即
+  不显示;不参与胶囊收起;框架只透传点击,不认识通知语义
+- 前端 bundle 升级改「强制自动 + 仅告知」:启动前 pending 一律静默激活
+  (autoUpdate 包原旁路全量化:「立即升级/暂不升级」弹窗与 declined 记账删除,
+  所有包一致),激活后 onUpdateApplied 供宿主发告知通知;运行中 UPDATE_READY
+  只广播 onUpdateReady,autoUpdate 包走 autoApplyPendingUpdateFromHost 静默
+  冷重启,其余包等下次启动生效;onUpdateDeclined/promptPendingUpdateFromHost
+  不再有调用方,随死代码删除
+- autoSync 全量保留:syncMiniProgram/syncInBackground/syncPackage/
+  autoApplyPendingUpdateFromHost/MiniProgram.autoUpdate 原样
+
+验证:compileDebugKotlin + compileDebugUnitTestKotlin 通过;配套宿主 dsh-Go
+2fa28545 已接线。
+---
+ .../src/main/kotlin/com/didi/dimina/Dimina.kt |  66 ++++-
+ .../didi/dimina/MiniProgramUpdateListener.kt  |  16 +-
+ .../kotlin/com/didi/dimina/core/MiniApp.kt    |  38 +--
+ .../didi/dimina/core/RemoteUpdateManager.kt   |   2 +-
+ .../dimina/ui/container/DiminaActivity.kt     | 279 +++++++++---------
+ 5 files changed, 217 insertions(+), 184 deletions(-)
+
+diff --git a/android/dimina/src/main/kotlin/com/didi/dimina/Dimina.kt b/android/dimina/src/main/kotlin/com/didi/dimina/Dimina.kt
+index dc44f69..ab079ea 100644
+--- a/android/dimina/src/main/kotlin/com/didi/dimina/Dimina.kt
++++ b/android/dimina/src/main/kotlin/com/didi/dimina/Dimina.kt
+@@ -3,8 +3,14 @@ package com.didi.dimina
+ import android.app.Activity
+ import android.content.Context
+ import android.graphics.Color
++import android.os.Handler
++import android.os.Looper
+ import androidx.annotation.ColorInt
+ import androidx.annotation.MainThread
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableIntStateOf
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.setValue
+ import com.didi.dimina.api.ext.ExtModuleHandler
+ import com.didi.dimina.bean.MiniProgram
+ import com.didi.dimina.common.LogUtils
+@@ -19,6 +25,25 @@ import kotlinx.coroutines.SupervisorJob
+ import kotlinx.coroutines.launch
+ import kotlinx.coroutines.withContext
+ 
++/**
++ * 容器 Header 通知入口的状态。
++ *
++ * 框架不解释「通知」语义：这里只是一个入口壳（是否显示 / 未读角标 / 点击回调），
++ * 显示与否、角标数值、点击后打开什么页面都完全由宿主决定。属性是 Compose 可观察状态，
++ * 容器 Compose 树读取后会在宿主推送时自动重组；宿主从未设置时保持「不显示、无角标」，
++ * 对不接通知的其它嵌入方零影响。
++ */
++internal class NotifyEntryState {
++    var visible by mutableStateOf(false)
++        internal set
++
++    var unread by mutableIntStateOf(0)
++        internal set
++
++    var onEntryClick by mutableStateOf<(() -> Unit)?>(null)
++        internal set
++}
++
+ /**
+  * Author: Doslin
+  */
+@@ -150,7 +175,8 @@ class Dimina private constructor(context: Context) {
+     /**
+      * 注册宿主侧升级事件监听(见 [MiniProgramUpdateListener])。
+      *
+-     * 升级由框架全权负责:容器后台检测+下载,弹窗问用户,确认后换包冷重启;
++     * 升级由框架全权负责:容器后台检测+下载,不询问用户(契约 §6.4「强制自动 + 仅告知」),
++     * pending 包在下次打开时静默激活;宿主用 onUpdateApplied 的版本号发告知。
+      * 小程序侧不参与升级决策。传 null 注销。回调都在主线程。
+      */
+     fun setOnMiniProgramUpdateListener(listener: MiniProgramUpdateListener?) {
+@@ -294,6 +320,44 @@ class Dimina private constructor(context: Context) {
+     /** 宿主是否显式配置过胶囊颜色;false=走微信默认语义(CapsuleStyle)。 */
+     internal fun hasExplicitCapsuleColors(): Boolean = config.capsuleColorsExplicit
+ 
++    // ---- 容器 Header 通知入口（宿主设置，框架只做入口壳） ----
++
++    private val notifyEntryStateImpl = NotifyEntryState()
++
++    /** 容器 Compose 树读取通知入口状态；宿主通过 [setNotifyEntry] 等三个方法推送。 */
++    internal fun notifyEntryState(): NotifyEntryState = notifyEntryStateImpl
++
++    /**
++     * 设置 Header 通知入口是否显示。
++     *
++     * 宿主从未调用时入口不显示（对其它嵌入方零影响）。容器不认识「通知」语义，
++     * 只按此开关渲染一个铃铛入口。
++     */
++    fun setNotifyEntry(visible: Boolean) {
++        runOnMainThread { notifyEntryStateImpl.visible = visible }
++    }
++
++    /**
++     * 设置通知未读数：`> 0` 显示红点角标与数字，`0` 隐藏数字（入口本身是否显示见 [setNotifyEntry]）。
++     * 未读数由宿主主动推送（轮询/已读变化时），容器不拉取。
++     */
++    fun setNotifyUnread(count: Int) {
++        runOnMainThread { notifyEntryStateImpl.unread = count.coerceAtLeast(0) }
++    }
++
++    /**
++     * 设置通知入口的点击回调；打开通知中心是宿主的事情，框架只负责把点击透传出来。
++     * 传 `null` 可清除回调，此时点击入口不做任何事。
++     */
++    fun setOnNotifyEntryClick(callback: (() -> Unit)?) {
++        runOnMainThread { notifyEntryStateImpl.onEntryClick = callback }
++    }
++
++    private fun runOnMainThread(block: () -> Unit) {
++        if (Looper.myLooper() == Looper.getMainLooper()) block()
++        else Handler(Looper.getMainLooper()).post(block)
++    }
++
+     /** Queries installed disk contents, not whether a runtime is currently alive. */
+     fun isExistsApp(appId: String): Boolean = getAppVersionInfo(appId) != null
+ 
+diff --git a/android/dimina/src/main/kotlin/com/didi/dimina/MiniProgramUpdateListener.kt b/android/dimina/src/main/kotlin/com/didi/dimina/MiniProgramUpdateListener.kt
+index 5d7515a..2f83cef 100644
+--- a/android/dimina/src/main/kotlin/com/didi/dimina/MiniProgramUpdateListener.kt
++++ b/android/dimina/src/main/kotlin/com/didi/dimina/MiniProgramUpdateListener.kt
+@@ -3,20 +3,24 @@ package com.didi.dimina
+ /**
+  * 宿主侧小程序升级事件监听。
+  *
+- * 升级的检测、下载、用户确认与换包生效全部由框架（宿主 + 容器）负责：容器在后台
+- * 检查到新版本并准备好 pending 包后弹窗问用户，确认后才 activate。小程序自身不参与
+- * 升级（wx.getUpdateManager 的 JS 事件总线仍保留，但只是向后兼容）。
++ * 升级的检测、下载与换包生效全部由框架（宿主 + 容器）负责，并采用「强制自动 + 仅告知」
++ * 策略（契约 §6.4）：检测到新版本后**不询问用户**，pending 包在下次冷启动时由容器静默
++ * 激活；运行中不中途重启。小程序自身不参与升级（wx.getUpdateManager 的 JS 事件总线
++ * 仍保留，但只是向后兼容）。宿主用 [onUpdateApplied] 的版本号发本地告知通知。
+  *
+  * 所有回调都在主线程。
+  */
+ interface MiniProgramUpdateListener {
+-    /** 新包已下载并校验完毕，等用户在容器弹窗里确认。 */
++    /** 新包已下载并校验完毕，将在下次打开时静默生效；容器不弹确认框。 */
+     fun onUpdateReady(appId: String, versionCode: Int, versionName: String) {}
+ 
+-    /** 用户在确认弹窗里选择了暂不升级（保留 pending 包，下次打开再问）。 */
++    /**
++     * 不再触发（v1.8.1 起 Bundle 升级强制自动，没有「暂不升级」路径）。
++     * 仅为宿主既有实现的源码/二进制兼容保留该默认方法。
++     */
+     fun onUpdateDeclined(appId: String, versionCode: Int) {}
+ 
+-    /** 用户确认升级且 pending 包已激活为当前版本（容器随后冷重启）。 */
++    /** pending 包已静默激活为当前版本（冷启动前换包；运行中不中途重启）。 */
+     fun onUpdateApplied(appId: String, versionCode: Int, versionName: String) {}
+ 
+     /** manifest 拉取/下载/校验/安装失败。 */
+diff --git a/android/dimina/src/main/kotlin/com/didi/dimina/core/MiniApp.kt b/android/dimina/src/main/kotlin/com/didi/dimina/core/MiniApp.kt
+index 6358fbb..90d92d9 100644
+--- a/android/dimina/src/main/kotlin/com/didi/dimina/core/MiniApp.kt
++++ b/android/dimina/src/main/kotlin/com/didi/dimina/core/MiniApp.kt
+@@ -120,23 +120,11 @@ class MiniApp private constructor() {
+     private var updateListener: MiniProgramUpdateListener? = null
+     private val updateMainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+ 
+-    // 本次运行期用户已拒绝升级的版本(per app):拒绝后同一会话内不再重复弹窗;
+-    // app 被 clear(关闭/卸载)即清除,下次打开重新问。
+-    private val declinedUpdateVersions = mutableMapOf<String, Int>()
+-
+     @androidx.annotation.MainThread
+     fun setOnUpdateListener(listener: MiniProgramUpdateListener?) {
+         updateListener = listener
+     }
+ 
+-    internal fun isUpdateDeclined(appId: String, versionCode: Int): Boolean =
+-        synchronized(declinedUpdateVersions) { declinedUpdateVersions[appId] == versionCode }
+-
+-    internal fun recordUpdateDeclined(appId: String, versionCode: Int) {
+-        synchronized(declinedUpdateVersions) { declinedUpdateVersions[appId] = versionCode }
+-        notifyUpdateDeclined(appId, versionCode)
+-    }
+-
+     private fun notifyUpdate(appId: String, notify: (MiniProgramUpdateListener) -> Unit) {
+         updateMainHandler.post {
+             updateListener?.let(notify)
+@@ -146,9 +134,6 @@ class MiniApp private constructor() {
+     internal fun notifyUpdateReady(appId: String, versionCode: Int, versionName: String) =
+         notifyUpdate(appId) { it.onUpdateReady(appId, versionCode, versionName) }
+ 
+-    internal fun notifyUpdateDeclined(appId: String, versionCode: Int) =
+-        notifyUpdate(appId) { it.onUpdateDeclined(appId, versionCode) }
+-
+     internal fun notifyUpdateApplied(appId: String, versionCode: Int, versionName: String) =
+         notifyUpdate(appId) { it.onUpdateApplied(appId, versionCode, versionName) }
+ 
+@@ -295,10 +280,12 @@ class MiniApp private constructor() {
+ 
+     /**
+      * 后台检查结果统一出口。JS 总线事件保留(wx.getUpdateManager 向后兼容),同时走
+-     * 框架链路:新包就绪 → 通知宿主监听器;若小程序正在运行,由容器弹窗问用户,确认后
+-     * applyUpdate 换包冷重启。升级决策完全在框架侧,小程序不参与。
+-     * autoSync 包(miniProgram.autoUpdate)例外:跳过弹窗直接激活——确认语义由
+-     * 服务端 bundle.json 的 autoSync 字段表达。
++     * 框架链路。Bundle 升级是「强制自动 + 仅告知」(契约 §6.4):新包就绪时**不询问用户**。
++     * autoSync 包(miniProgram.autoUpdate)运行中直接静默升级(激活+冷重启,确认语义由
++     * 服务端 bundle.json 的 autoSync 字段表达);其余包不在运行中途冷重启——pending 包
++     * 留在磁盘,下次打开由容器静默激活(见 DiminaActivity 冷启动路径),激活后发
++     * onUpdateApplied(带版本号)供宿主发告知通知。运行中这里只发 onUpdateReady 供
++     * 宿主刷新状态(如市场页「有新版本」),无需用户操作。
+      */
+     private fun onRemoteUpdateEvent(context: Context, miniProgram: MiniProgram, event: String) {
+         val appId = miniProgram.appId
+@@ -309,19 +296,16 @@ class MiniApp private constructor() {
+                 notifyUpdateReady(appId, pending.versionCode, pending.versionName)
+                 if (miniProgram.autoUpdate) {
+                     updateMainHandler.post {
+-                        // 在跑 → 容器激活+冷重启(与用户确认路径同一套 applyUpdate);
+-                        // 没在跑 → 这里直接激活 pending,下次打开即新版本。
++                        // autoSync 包:在跑 → 容器激活+冷重启(与用户确认路径同一套
++                        // applyUpdate);没在跑 → 这里直接激活 pending,下次打开即新版本。
+                         if (!DiminaActivity.autoApplyPendingUpdateFromHost(appId)) {
+                             if (RemoteUpdateManager.activatePendingUpdate(context, appId)) {
+                                 notifyUpdateApplied(appId, pending.versionCode, pending.versionName)
+                             }
+                         }
+                     }
+-                } else if (!isUpdateDeclined(appId, pending.versionCode)) {
+-                    updateMainHandler.post {
+-                        DiminaActivity.promptPendingUpdateFromHost(appId, pending.versionCode, pending.versionName)
+-                    }
+                 }
++                // 非 autoUpdate:不询问、不运行中冷重启(§6.4);pending 留盘,下次启动静默激活。
+             }
+             RemoteUpdateManager.EVENT_UPDATE_FAILED -> notifyUpdateFailed(appId, null)
+         }
+@@ -650,10 +634,6 @@ class MiniApp private constructor() {
+         synchronized(this) {
+             pendingAppShowOptions.remove(appId)
+         }
+-        // 拒绝升级只约束一次运行期;关掉小程序后下次打开重新问。
+-        synchronized(declinedUpdateVersions) {
+-            declinedUpdateVersions.remove(appId)
+-        }
+         // Silently tear down this owner's WebSocket connections/timers/listeners first,
+         // ahead of JsCore.destroy(), so no transport event can race into a dying JsCore.
+         com.didi.dimina.api.network.WebSocketManager.shared.disposeOwner(appId)
+diff --git a/android/dimina/src/main/kotlin/com/didi/dimina/core/RemoteUpdateManager.kt b/android/dimina/src/main/kotlin/com/didi/dimina/core/RemoteUpdateManager.kt
+index 300cdfb..df3e0d4 100644
+--- a/android/dimina/src/main/kotlin/com/didi/dimina/core/RemoteUpdateManager.kt
++++ b/android/dimina/src/main/kotlin/com/didi/dimina/core/RemoteUpdateManager.kt
+@@ -407,7 +407,7 @@ object RemoteUpdateManager {
+     internal class PendingUpdateInfo(val versionCode: Int, val versionName: String)
+ 
+     /**
+-     * 探测已就绪的 pending 新包,供框架升级确认弹窗使用(弹窗问用户后才激活)。
++     * 探测已就绪的 pending 新包,供容器在冷启动时静默激活(契约 §6.4:强制自动升级,不弹窗)。
+      * 只读不删:无效 pending 由 [readPendingPackage] 的既有清理逻辑处理。
+      */
+     internal fun peekPendingUpdate(context: Context, appId: String): PendingUpdateInfo? {
+diff --git a/android/dimina/src/main/kotlin/com/didi/dimina/ui/container/DiminaActivity.kt b/android/dimina/src/main/kotlin/com/didi/dimina/ui/container/DiminaActivity.kt
+index 3b2f7bb..960b933 100644
+--- a/android/dimina/src/main/kotlin/com/didi/dimina/ui/container/DiminaActivity.kt
++++ b/android/dimina/src/main/kotlin/com/didi/dimina/ui/container/DiminaActivity.kt
+@@ -53,6 +53,7 @@ import androidx.compose.foundation.layout.displayCutout
+ import androidx.compose.foundation.layout.fillMaxSize
+ import androidx.compose.foundation.layout.fillMaxWidth
+ import androidx.compose.foundation.layout.height
++import androidx.compose.foundation.layout.offset
+ import androidx.compose.foundation.layout.padding
+ import androidx.compose.foundation.layout.size
+ import androidx.compose.foundation.layout.statusBars
+@@ -66,7 +67,6 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+ import androidx.compose.material.icons.filled.Close
+ import androidx.compose.material.icons.filled.Home
+ import androidx.compose.material.icons.filled.Refresh
+-import androidx.compose.material3.AlertDialog
+ import androidx.compose.material3.CenterAlignedTopAppBar
+ import androidx.compose.material3.ExperimentalMaterial3Api
+ import androidx.compose.material3.HorizontalDivider
+@@ -75,7 +75,6 @@ import androidx.compose.material3.IconButton
+ import androidx.compose.material3.ModalBottomSheet
+ import androidx.compose.material3.Scaffold
+ import androidx.compose.material3.Text
+-import androidx.compose.material3.TextButton
+ import androidx.compose.material3.TopAppBarDefaults
+ import androidx.compose.material3.rememberModalBottomSheetState
+ import androidx.compose.runtime.Composable
+@@ -99,6 +98,8 @@ import androidx.compose.ui.geometry.Offset
+ import androidx.compose.ui.geometry.Size
+ import androidx.compose.ui.graphics.Color
+ import androidx.compose.ui.graphics.Path
++import androidx.compose.ui.graphics.StrokeCap
++import androidx.compose.ui.graphics.StrokeJoin
+ import androidx.compose.ui.graphics.asImageBitmap
+ import androidx.compose.ui.graphics.drawscope.Stroke
+ import androidx.compose.ui.graphics.vector.ImageVector
+@@ -148,7 +149,6 @@ import com.didi.dimina.ui.view.VideoCaptureOptions
+ import com.didi.dimina.ui.view.NativeComponentHost
+ import com.didi.dimina.ui.view.ScanCodeLauncher
+ import com.didi.dimina.ui.view.WebViewCacheManager
+-import kotlinx.coroutines.CompletableDeferred
+ import kotlinx.coroutines.CoroutineScope
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.delay
+@@ -255,13 +255,6 @@ class DiminaActivity : ComponentActivity() {
+     private lateinit var contactPicker: ContactPicker
+     private lateinit var scanCodeLauncher: ScanCodeLauncher
+ 
+-    // ---- 框架升级确认弹窗:升级由框架(容器+宿主)全权负责,小程序侧不参与。 ----
+-    // 非 null 时在内容之上渲染 material3「发现新版本」AlertDialog;用户决定经
+-    // CompletableDeferred 交回挂起的调用方(冷启动 prepare 门 或 运行中的就绪提示)。
+-    private data class PendingUpdatePrompt(val versionCode: Int, val versionName: String)
+-    private val pendingUpdatePrompt = mutableStateOf<PendingUpdatePrompt?>(null)
+-    private var pendingUpdateChoice: CompletableDeferred<Boolean>? = null
+-
+     private var imageChooseCallback: ((List<String>) -> Unit)? = null
+     private var messageFileChooseCallback: ((Boolean, List<Uri>) -> Unit)? = null
+     private val messageFilePickerLauncher = registerForActivityResult(
+@@ -615,28 +608,6 @@ class DiminaActivity : ComponentActivity() {
+ 
+         setContent {
+             DiminaAndroidTheme {
+-                // 框架升级确认弹窗:新包就绪后问用户是否立即升级(升级由框架负责)。
+-                pendingUpdatePrompt.value?.let { prompt ->
+-                    AlertDialog(
+-                        onDismissRequest = { resolvePendingUpdate(false) },
+-                        title = { Text("发现新版本") },
+-                        text = {
+-                            Text(
+-                                if (prompt.versionName.isBlank()) {
+-                                    "新版本已准备好(v${prompt.versionCode}),是否立即升级?"
+-                                } else {
+-                                    "新版本 ${prompt.versionName} 已准备好,是否立即升级?"
+-                                }
+-                            )
+-                        },
+-                        confirmButton = {
+-                            TextButton(onClick = { resolvePendingUpdate(true) }) { Text("立即升级") }
+-                        },
+-                        dismissButton = {
+-                            TextButton(onClick = { resolvePendingUpdate(false) }) { Text("暂不升级") }
+-                        },
+-                    )
+-                }
+                 val pageBackgroundColor = parseCssColor(backgroundColor.value)
+                 Scaffold(
+                     modifier = Modifier.fillMaxSize(),
+@@ -757,26 +728,17 @@ class DiminaActivity : ComponentActivity() {
+                         appId, miniProgram.versionCode, miniProgram.versionName,
+                     )
+                 } else {
+-                    // 框架升级确认:上次运行下载好的 pending 新包还在 → 本次启动前弹窗问
+-                    // 用户;确认则先激活再继续(下面的配置读取直接拿到新包),拒绝则照旧
+-                    // 跑当前版本。升级决策完全在框架侧,小程序不参与。
+-                    // autoSync 包(miniProgram.autoUpdate)例外:跳过弹窗直接激活,
+-                    // 确认语义由服务端 bundle.json 的 autoSync 字段表达。
++                    // Bundle 强制自动升级(契约 §6.4):上次运行检测/下载好的 pending 新包
++                    // 还在 → 本次启动前**静默激活**,不询问用户(autoUpdate 包的既有旁路
++                    // 由此全量化:弹窗与 declined 记账已删,所有包一致)。此时运行时/页面栈
++                    // 尚未建立,换包就是「下次打开自动生效」,不存在中途重启。激活成功即发
++                    // onUpdateApplied(带版本号)供宿主发告知通知;激活失败则照旧跑当前版本,
++                    // 保持静默(下载失败本来就走 no-update,不打扰)。
+                     val pending = RemoteUpdateManager.peekPendingUpdate(applicationContext, appId)
+                     if (pending != null && pending.versionCode > VersionUtils.getAppVersion(appId)) {
+-                        if (miniProgram.autoUpdate) {
+-                            if (RemoteUpdateManager.activatePendingUpdate(applicationContext, appId)) {
+-                                miniProgram = miniProgram.copy(versionCode = pending.versionCode)
+-                                MiniApp.getInstance().notifyUpdateApplied(appId, pending.versionCode, pending.versionName)
+-                            }
+-                        } else if (!miniApp.isUpdateDeclined(appId, pending.versionCode)) {
+-                            val decision = askPendingUpdateDecision(pending.versionCode, pending.versionName)
+-                            if (decision == true && RemoteUpdateManager.activatePendingUpdate(applicationContext, appId)) {
+-                                miniProgram = miniProgram.copy(versionCode = pending.versionCode)
+-                                MiniApp.getInstance().notifyUpdateApplied(appId, pending.versionCode, pending.versionName)
+-                            } else if (decision == false) {
+-                                miniApp.recordUpdateDeclined(appId, pending.versionCode)
+-                            }
++                        if (RemoteUpdateManager.activatePendingUpdate(applicationContext, appId)) {
++                            miniProgram = miniProgram.copy(versionCode = pending.versionCode)
++                            MiniApp.getInstance().notifyUpdateApplied(appId, pending.versionCode, pending.versionName)
+                         }
+                     }
+                 }
+@@ -2210,6 +2172,25 @@ class DiminaActivity : ComponentActivity() {
+                         )
+                     )
+                 }
++                // Header 右侧通知入口:宿主通过 Dimina.setNotifyEntry 打开,从未调用则不渲染。
++                // 它只是入口壳(不参与胶囊收起逻辑——收起态下仍常驻),点击回调给宿主;
++                // 配色跟随胶囊同一套 capsuleThemeTick / navigationBarTextStyle 机制。
++                val notifyEntryState = Dimina.getInstance().notifyEntryState()
++                if (notifyEntryState.visible) {
++                    MiniProgramNotifyEntry(
++                        iconColor = capsuleFg,
++                        unread = notifyEntryState.unread,
++                        onClick = { notifyEntryState.onEntryClick?.invoke() },
++                        modifier = Modifier
++                            .align(Alignment.TopEnd)
++                            .padding(
++                                top = capsuleTopPadding,
++                                end = (windowInfo.getInt("windowWidth") - menuRect.right).dp +
++                                    MenuButtonLayout.WIDTH_DP.dp + NOTIFY_ENTRY_GAP_DP.dp
++                            )
++                            .zIndex(10f)
++                    )
++                }
+                 // 收起后 6s 空闲自动展开(契约式隐藏)。
+                 LaunchedEffect(capsuleCollapsed.value) {
+                     if (capsuleCollapsed.value) {
+@@ -2479,53 +2460,6 @@ class DiminaActivity : ComponentActivity() {
+         activityRegistry.closeAll(miniProgram.appId) { it.finish() }
+     }
+ 
+-    // ---- 框架升级确认弹窗 ----
+-
+-    /**
+-     * 挂起等待用户在「发现新版本」弹窗里的决定。返回 null = 弹窗没能展示
+-     * (宿主已销毁或已有弹窗在等);true/false = 用户选了 升级/暂不。
+-     * 主线程渲染,可在任意线程挂起调用。
+-     */
+-    private suspend fun askPendingUpdateDecision(versionCode: Int, versionName: String): Boolean? =
+-        withContext(Dispatchers.Main) {
+-            if (destroyedByHost || isFinishing || isDestroyed || pendingUpdateChoice != null) {
+-                return@withContext null
+-            }
+-            val choice = CompletableDeferred<Boolean>()
+-            pendingUpdateChoice = choice
+-            pendingUpdatePrompt.value = PendingUpdatePrompt(versionCode, versionName)
+-            try {
+-                choice.await()
+-            } finally {
+-                if (pendingUpdateChoice === choice) {
+-                    pendingUpdateChoice = null
+-                    pendingUpdatePrompt.value = null
+-                }
+-            }
+-        }
+-
+-    /** 弹窗按钮/系统返回的回调:关掉弹窗并把用户决定交回挂起的调用方。 */
+-    private fun resolvePendingUpdate(confirmed: Boolean) {
+-        pendingUpdatePrompt.value = null
+-        pendingUpdateChoice?.complete(confirmed)
+-        pendingUpdateChoice = null
+-    }
+-
+-    /**
+-     * 运行中新包就绪:弹窗问用户。确认 → [applyUpdate](激活+冷重启);
+-     * 暂不 → 记录到本会话拒绝表(同一 pending 版本本次运行不再重复弹)。
+-     */
+-    internal fun promptPendingUpdate(versionCode: Int, versionName: String) {
+-        CoroutineScope(Dispatchers.Main).launch {
+-            val confirmed = askPendingUpdateDecision(versionCode, versionName)
+-            if (confirmed == true) {
+-                applyUpdate()
+-            } else if (confirmed == false) {
+-                miniApp.recordUpdateDeclined(miniProgram.appId, versionCode)
+-            }
+-        }
+-    }
+-
+     private fun getDefaultEntryPagePath(): String? {
+         if (!::appConfig.isInitialized) {
+             return null
+@@ -2748,6 +2682,84 @@ class DiminaActivity : ComponentActivity() {
+         }
+     }
+ 
++    /**
++     * Header 通知入口(铃铛) + 未读角标。
++     *
++     * 框架不认识「通知」语义:这只是宿主打开的入口壳,图标/角标颜色跟随胶囊主题
++     * ([capsuleFg] 由 capsuleThemeTick + navigationBarTextStyle 派生),不读任何业务状态。
++     * 角标:未读 >0 显示红点+数字,=0 只显示铃铛。
++     */
++    @Composable
++    private fun MiniProgramNotifyEntry(
++        iconColor: Color,
++        unread: Int,
++        onClick: () -> Unit,
++        modifier: Modifier = Modifier,
++    ) {
++        val badgeColor = Color(0xFFFA5151)
++        // 外层不裁剪:角标允许探出圆角热区;内层单独裁剪出圆形点击涟漪。
++        Box(modifier = modifier.size(NOTIFY_ENTRY_SIZE_DP.dp)) {
++            Box(
++                modifier = Modifier
++                    .size(NOTIFY_ENTRY_SIZE_DP.dp)
++                    .clip(CircleShape)
++                    .clickable(onClick = onClick),
++                contentAlignment = Alignment.Center,
++            ) {
++                Canvas(modifier = Modifier.size(20.dp)) {
++                    val w = size.width
++                    val h = size.height
++                    val stroke = 1.6.dp.toPx()
++                    // 铃身:圆顶 + 下摆外扩,描边绘制(不依赖 material-icons-extended)。
++                    val bell = Path().apply {
++                        moveTo(w * 0.16f, h * 0.70f)
++                        cubicTo(w * 0.16f, h * 0.44f, w * 0.26f, h * 0.30f, w * 0.50f, h * 0.30f)
++                        cubicTo(w * 0.74f, h * 0.30f, w * 0.84f, h * 0.44f, w * 0.84f, h * 0.70f)
++                        lineTo(w * 0.92f, h * 0.78f)
++                        lineTo(w * 0.08f, h * 0.78f)
++                        close()
++                    }
++                    drawPath(
++                        path = bell,
++                        color = iconColor,
++                        style = Stroke(width = stroke, cap = StrokeCap.Round, join = StrokeJoin.Round),
++                    )
++                    // 顶部提钮
++                    drawLine(
++                        color = iconColor,
++                        start = Offset(w * 0.50f, h * 0.20f),
++                        end = Offset(w * 0.50f, h * 0.30f),
++                        strokeWidth = stroke,
++                        cap = StrokeCap.Round,
++                    )
++                    // 铃舌
++                    drawCircle(color = iconColor, radius = w * 0.075f, center = Offset(w * 0.50f, h * 0.86f))
++                }
++            }
++            if (unread > 0) {
++                val label = if (unread > 99) "99+" else unread.toString()
++                Box(
++                    modifier = Modifier
++                        .align(Alignment.TopEnd)
++                        .offset(x = 3.dp, y = (-1).dp)
++                        .height(14.dp)
++                        .clip(CircleShape)
++                        .background(badgeColor)
++                        .padding(horizontal = 4.dp),
++                    contentAlignment = Alignment.Center,
++                ) {
++                    Text(
++                        text = label,
++                        color = Color.White,
++                        fontSize = 9.sp,
++                        fontWeight = FontWeight.Medium,
++                        maxLines = 1,
++                    )
++                }
++            }
++        }
++    }
++
+     @Composable
+     private fun MiniProgramCapsuleButton(
+         backgroundColor: Color,
+@@ -2959,48 +2971,27 @@ class DiminaActivity : ComponentActivity() {
+                     state.homeButtonHidden.value = false
+                 }
+ 
+-                // redirectTo 修复（2026-11-11）：旧实现 destroy(true)+init(false) 原位复用
+-                // Bridge/WebView，跳过 addJavascriptInterface 重挂、jscore 回调重注册与
+-                // canvasChannel 重建——reload 后 render→container 事件链静默死亡，新页面
+-                // 所有 bindtap 永久失效（真机实证；navigateTo=新 Activity 全新桥、
+-                // switchTab=独立桥完整 init 均正常）。改走与首次加载完全一致的已验证
+-                // 路径：完整销毁旧桥 → createBridge/init(true) 重建全新桥（旧 WebView
+-                // 复用，重挂注入接口幂等；新桥=新 bridgeId 无回调冲突）。
+-                miniApp.removeBridge(miniProgram.appId, currentBridge)
+-                currentBridge.destroy(false)
+-
++                currentBridge.destroy(true)
++                // 更新当前 bridge 的配置
++                currentBridge.updateOptions(
++                    pathInfo = pathInfo,
++                    root = pageConfig?.root ?: "main",
++                    configInfo = mergedPageConfig
++                )
++                currentBridge.init(false)
+                 if (activeTabState != null && activeTabIndex >= 0) {
+-                    // tab 容器：置空桥状态，走 onTabWebViewReady 既有重建路径
+-                    // （bridge==null 即全量 createBridge，start 仍由 pageLoaded 门控）
+-                    activeTabState.bridge = null
+-                    activeTabState.webView?.let { onTabWebViewReady(activeTabIndex, it) }
+-                } else {
+-                    // 非 tab 页：克隆旧桥 options（保留 isRoot/scene/referrerInfo 等语义，
+-                    // 仅替换路径/根目录/页面配置），与 navigateTo 同款全量建桥
+-                    withWebView { webView ->
+-                        val freshBridge = createBridge(
+-                            BridgeOptions(
+-                                pathInfo = pathInfo,
+-                                scene = currentBridge.options.scene,
+-                                jscore = currentBridge.options.jscore,
+-                                webview = webView,
+-                                isRoot = currentBridge.options.isRoot,
+-                                root = pageConfig?.root ?: "main",
+-                                appId = currentBridge.options.appId,
+-                                runtimeType = currentBridge.options.runtimeType,
+-                                pages = currentBridge.options.pages,
+-                                configInfo = mergedPageConfig,
+-                                referrerInfo = currentBridge.options.referrerInfo,
+-                            )
+-                        )
+-                        // Add bridge to MiniApp's bridge list for this appId
+-                        miniApp.addBridge(miniProgram.appId, freshBridge)
+-
+-                        withWebViewPageLoaded {
+-                            LogUtils.d(tag, "Page loaded, starting fresh bridge (redirectTo)")
+-                            freshBridge.start()
++                    withTabWebViewPageLoaded(activeTabIndex) {
++                        if (!activeTabState.bridgeStarted) {
++                            LogUtils.d(tag, "Tab page loaded, restarting bridge: index=$activeTabIndex")
++                            activeTabState.bridgeStarted = true
++                            currentBridge.start()
+                         }
+                     }
++                } else {
++                    withWebViewPageLoaded {
++                        LogUtils.d(tag, "Page loaded, restarting bridge")
++                        currentBridge.start()
++                    }
+                 }
+             }
+         }
+@@ -3034,6 +3025,10 @@ class DiminaActivity : ComponentActivity() {
+ 
+         private const val HOST_GENERATION_KEY = "dimina_host_generation"
+         private const val HOST_SESSION_KEY = "dimina_host_session"
++
++        // Header 通知入口:铃铛热区尺寸与它到胶囊左缘的间距(§6.3)。
++        private const val NOTIFY_ENTRY_SIZE_DP = 32
++        private const val NOTIFY_ENTRY_GAP_DP = 8
+         private val hostSession = java.util.UUID.randomUUID().toString()
+         private var hostGeneration = 0L
+         private val pendingLaunches = mutableSetOf<String>()
+@@ -3226,17 +3221,6 @@ class DiminaActivity : ComponentActivity() {
+             return true
+         }
+ 
+-        /**
+-         * 框架升级确认弹窗的宿主入口:新包就绪时由 MiniApp 在主线程调用,路由到该
+-         * 小程序当前最上层 Activity 展示「发现新版本」弹窗。
+-         */
+-        @androidx.annotation.MainThread
+-        internal fun promptPendingUpdateFromHost(appId: String, versionCode: Int, versionName: String): Boolean {
+-            val activity = activityRegistry.lastRegistered(appId) ?: return false
+-            activity.promptPendingUpdate(versionCode, versionName)
+-            return true
+-        }
+-
+         /**
+          * autoSync 静默升级的宿主入口(autoSync 扩展):新包就绪且小程序正在运行时
+          * 由 MiniApp 在主线程调用,直接走 [DiminaActivity.applyUpdate](激活+冷重启,
+@@ -3250,6 +3234,7 @@ class DiminaActivity : ComponentActivity() {
+             return true
+         }
+ 
++
+         internal fun canEvictRetainedApp(appId: String): Boolean {
+             val activity = activityRegistry.lastRegistered(appId) ?: return true
+             return activity.retainedByHost && !visibilityTracker.isForeground(appId)
+-- 
+2.50.1 (Apple Git-155)
+

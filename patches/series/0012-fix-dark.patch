@@ -1,0 +1,154 @@
+From 5bb040a295874fbd5df53c194904a65aa8d12064 Mon Sep 17 00:00:00 2001
+From: Wei Mingchen <weimingchen1997@qq.com>
+Date: Mon, 9 Nov 2026 23:21:04 +0800
+Subject: [PATCH 12/25] =?UTF-8?q?fix:=E8=8F=9C=E5=8D=95=E5=BC=B9=E5=B1=82?=
+ =?UTF-8?q?=E6=B7=B1=E6=B5=85=E8=89=B2=E4=BF=AE=E5=A4=8D=E2=80=94=E2=80=94?=
+ =?UTF-8?q?dark=20=E5=8F=96=E5=80=BC=E6=94=B9=E4=B8=BA=E5=AE=BF=E4=B8=BB?=
+ =?UTF-8?q?=E8=A6=86=E5=86=99=3F:=E7=B3=BB=E7=BB=9F=E6=B7=B1=E6=B5=85,?=
+ =?UTF-8?q?=E7=93=A6=E7=89=87/=E5=88=86=E9=9A=94=E7=BA=BF/=E5=8F=96?=
+ =?UTF-8?q?=E6=B6=88/=E5=A4=B4=E5=83=8F=E5=86=99=E6=AD=BB=E6=B5=85?=
+ =?UTF-8?q?=E8=89=B2=E5=85=A8=E9=83=A8=E5=8F=82=E6=95=B0=E5=8C=96?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .../src/main/kotlin/com/didi/dimina/Dimina.kt |  3 ++
+ .../dimina/ui/container/DiminaActivity.kt     | 36 ++++++++++++++-----
+ 2 files changed, 30 insertions(+), 9 deletions(-)
+
+diff --git a/android/dimina/src/main/kotlin/com/didi/dimina/Dimina.kt b/android/dimina/src/main/kotlin/com/didi/dimina/Dimina.kt
+index 4883faa..b7da827 100644
+--- a/android/dimina/src/main/kotlin/com/didi/dimina/Dimina.kt
++++ b/android/dimina/src/main/kotlin/com/didi/dimina/Dimina.kt
+@@ -265,6 +265,9 @@ class Dimina private constructor(context: Context) {
+     /** 当前胶囊主题是否深色(菜单等面板配色跟它走)。 */
+     fun isCapsuleThemeDark(): Boolean = capsuleDarkOverride ?: false
+ 
++    /** 宿主注入的深浅覆写原值;null=宿主未注入,菜单等面板配色退回系统深浅色。 */
++    fun capsuleDarkOverride(): Boolean? = capsuleDarkOverride
++
+     @ColorInt
+     internal fun getCapsuleBackgroundColor(): Int = config.capsuleBackgroundColor
+ 
+diff --git a/android/dimina/src/main/kotlin/com/didi/dimina/ui/container/DiminaActivity.kt b/android/dimina/src/main/kotlin/com/didi/dimina/ui/container/DiminaActivity.kt
+index 53aeb7a..9dd41ba 100644
+--- a/android/dimina/src/main/kotlin/com/didi/dimina/ui/container/DiminaActivity.kt
++++ b/android/dimina/src/main/kotlin/com/didi/dimina/ui/container/DiminaActivity.kt
+@@ -39,6 +39,7 @@ import androidx.compose.foundation.background
+ import androidx.compose.foundation.border
+ import androidx.compose.foundation.clickable
+ import androidx.compose.foundation.gestures.awaitEachGesture
++import androidx.compose.foundation.isSystemInDarkTheme
+ import androidx.compose.foundation.layout.Arrangement
+ import androidx.compose.foundation.layout.Box
+ import androidx.compose.foundation.layout.Column
+@@ -2579,12 +2580,20 @@ class DiminaActivity : ComponentActivity() {
+         onCloseClick: () -> Unit,
+         onDismiss: () -> Unit
+     ) {
+-        // 面板配色跟胶囊主题走(dsh-go 宿主按亮度注入,见 miniprogram-spec §8)。
+-        val dark = Dimina.getInstance().isCapsuleThemeDark()
++        // 面板配色:原生壳层 chrome,微信语义=跟系统深浅色走(与小程序是否声明
++        // darkmode 无关);宿主显式注入的覆写仍优先(dsh-go 按宿主主题注入)。
++        val dark = Dimina.getInstance().capsuleDarkOverride() ?: isSystemInDarkTheme()
+         val sheetContainer = if (dark) Color(0xFF1D1F27) else Color.White
+         val sheetIconBg = if (dark) Color(0xFF2A2D34) else Color(0xFFF4F4F4)
++        val sheetAvatar = if (dark) Color(0xFF9AA1A9) else Color(0xFF8A8A8A)
+         val sheetTitle = if (dark) Color(0xFFE8EAED) else Color(0xFF202020)
+         val sheetSub = if (dark) Color(0xFF9AA1A9) else Color(0xFF9A9A9A)
++        val sheetTileBg = if (dark) Color(0xFF2A2D34) else Color(0xFFF8F8F8)
++        val sheetTileIcon = if (dark) Color(0xFFE8EAED) else Color(0xFF333333)
++        val sheetTileLabel = if (dark) Color(0xFFB9BFC7) else Color(0xFF686868)
++        val sheetDividerTop = if (dark) Color(0xFF2A2D34) else Color(0xFFF2F2F2)
++        val sheetDividerBottom = if (dark) Color(0xFF2A2D34) else Color(0xFFEDEDED)
++        val sheetCancel = if (dark) Color(0xFF7D90B8) else Color(0xFF576B95)
+         val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+         ModalBottomSheet(
+             onDismissRequest = onDismiss,
+@@ -2610,7 +2619,7 @@ class DiminaActivity : ComponentActivity() {
+                         Text(
+                             text = appName.take(1).ifBlank { "小" },
+                             fontSize = 18.sp,
+-                            color = Color(0xFF8A8A8A),
++                            color = sheetAvatar,
+                             fontWeight = FontWeight.Medium
+                         )
+                     }
+@@ -2629,7 +2638,7 @@ class DiminaActivity : ComponentActivity() {
+                     }
+                 }
+ 
+-                HorizontalDivider(color = Color(0xFFF2F2F2), thickness = 1.dp)
++                HorizontalDivider(color = sheetDividerTop, thickness = 1.dp)
+ 
+                 Row(
+                     modifier = Modifier
+@@ -2642,6 +2651,9 @@ class DiminaActivity : ComponentActivity() {
+                         icon = Icons.Filled.Refresh,
+                         contentDescription = "重新进入小程序",
+                         onClick = onReenterClick,
++                        tileBackground = sheetTileBg,
++                        iconTint = sheetTileIcon,
++                        labelColor = sheetTileLabel,
+                         modifier = Modifier.width(78.dp)
+                     )
+                     MiniProgramMenuItem(
+@@ -2649,15 +2661,18 @@ class DiminaActivity : ComponentActivity() {
+                         icon = Icons.Filled.Close,
+                         contentDescription = "关闭小程序",
+                         onClick = onCloseClick,
++                        tileBackground = sheetTileBg,
++                        iconTint = sheetTileIcon,
++                        labelColor = sheetTileLabel,
+                         modifier = Modifier.width(78.dp)
+                     )
+                 }
+ 
+-                HorizontalDivider(color = Color(0xFFEDEDED), thickness = 1.dp)
++                HorizontalDivider(color = sheetDividerBottom, thickness = 1.dp)
+                 Text(
+                     text = "取消",
+                     fontSize = 18.sp,
+-                    color = Color(0xFF576B95),
++                    color = sheetCancel,
+                     textAlign = TextAlign.Center,
+                     modifier = Modifier
+                         .fillMaxWidth()
+@@ -2674,6 +2689,9 @@ class DiminaActivity : ComponentActivity() {
+         icon: ImageVector,
+         contentDescription: String,
+         onClick: () -> Unit,
++        tileBackground: Color,
++        iconTint: Color,
++        labelColor: Color,
+         modifier: Modifier = Modifier
+     ) {
+         Column(
+@@ -2684,20 +2702,20 @@ class DiminaActivity : ComponentActivity() {
+                 modifier = Modifier
+                     .size(52.dp)
+                     .clip(RoundedCornerShape(10.dp))
+-                    .background(Color(0xFFF8F8F8)),
++                    .background(tileBackground),
+                 contentAlignment = Alignment.Center
+             ) {
+                 Icon(
+                     imageVector = icon,
+                     contentDescription = contentDescription,
+-                    tint = Color(0xFF333333),
++                    tint = iconTint,
+                     modifier = Modifier.size(24.dp)
+                 )
+             }
+             Text(
+                 text = label,
+                 fontSize = 13.sp,
+-                color = Color(0xFF686868),
++                color = labelColor,
+                 textAlign = TextAlign.Center,
+                 lineHeight = 17.sp,
+                 modifier = Modifier.padding(top = 8.dp)
+-- 
+2.50.1 (Apple Git-155)
+

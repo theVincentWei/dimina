@@ -1,0 +1,180 @@
+From 03e0e458f063f0732a9a158e673ab71378f24d18 Mon Sep 17 00:00:00 2001
+From: Wei Mingchen <weimingchen1997@qq.com>
+Date: Mon, 9 Nov 2026 23:25:17 +0800
+Subject: [PATCH 13/25] =?UTF-8?q?fix:showActionSheet/showModal=20=E5=8E=9F?=
+ =?UTF-8?q?=E7=94=9F=E5=BC=B9=E5=B1=82=E6=B7=B1=E6=B5=85=E8=89=B2=E2=80=94?=
+ =?UTF-8?q?=E2=80=94=E7=99=BD=E5=BA=95/=E9=BB=91=E5=AD=97/=E6=B5=85?=
+ =?UTF-8?q?=E5=88=86=E9=9A=94=E5=86=99=E6=AD=BB=E6=94=B9=E9=9A=8F=E7=B3=BB?=
+ =?UTF-8?q?=E7=BB=9F=E6=B7=B1=E6=B5=85=E8=89=B2,=E6=98=BE=E5=BC=8F?=
+ =?UTF-8?q?=E8=87=AA=E5=AE=9A=E4=B9=89=E8=89=B2=E4=BB=8D=E4=BC=98=E5=85=88?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .../com/didi/dimina/api/ui/InteractionApi.kt  | 24 ++++++++++++-----
+ .../com/didi/dimina/ui/view/ActionSheet.kt    | 26 ++++++++++++++-----
+ 2 files changed, 37 insertions(+), 13 deletions(-)
+
+diff --git a/android/dimina/src/main/kotlin/com/didi/dimina/api/ui/InteractionApi.kt b/android/dimina/src/main/kotlin/com/didi/dimina/api/ui/InteractionApi.kt
+index 532197e..2842a6a 100644
+--- a/android/dimina/src/main/kotlin/com/didi/dimina/api/ui/InteractionApi.kt
++++ b/android/dimina/src/main/kotlin/com/didi/dimina/api/ui/InteractionApi.kt
+@@ -7,6 +7,7 @@ import android.os.Looper
+ import android.view.View
+ import android.view.ViewGroup
+ import androidx.compose.foundation.background
++import androidx.compose.foundation.isSystemInDarkTheme
+ import androidx.compose.foundation.layout.Arrangement
+ import androidx.compose.foundation.layout.Box
+ import androidx.compose.foundation.layout.BoxWithConstraints
+@@ -451,11 +452,20 @@ fun ModalContent(
+ ) {
+     BoxWithConstraints {
+         val contentScrollState = rememberScrollState()
++        // 深浅色:原生壳层 chrome,跟系统深浅色走(微信语义)。取消/确认色显式自定义
++        // 仍尊重原值;仅默认色(黑取消/#576B95 确认)在深色下换浅色系,否则不可读。
++        val dark = isSystemInDarkTheme()
++        val modalBg = if (dark) Color(0xFF1D1F27) else Color.White
++        val modalTitle = if (dark) Color(0xFFE8EAED) else Color.Black
++        val modalContent = if (dark) Color(0xFF9AA1A9) else Color(0xFF7F7F7F)
++        val modalDivider = if (dark) Color(0xFF2A2D34) else Color.LightGray
++        val resolvedCancel = if (dark && cancelColor == Color.Black) Color(0xFFE8EAED) else cancelColor
++        val resolvedConfirm = if (dark && confirmColor == Color(0xFF576B95)) Color(0xFF7D90B8) else confirmColor
+         Column(
+             modifier = Modifier
+                 .width(280.dp)
+                 .heightIn(max = maxHeight * MODAL_MAX_HEIGHT_FRACTION)
+-                .background(Color.White, RoundedCornerShape(8.dp))
++                .background(modalBg, RoundedCornerShape(8.dp))
+                 .padding(top = 16.dp),
+             horizontalAlignment = Alignment.CenterHorizontally,
+         ) {
+@@ -463,7 +473,7 @@ fun ModalContent(
+             if (title.isNotEmpty()) {
+                 Text(
+                     text = title,
+-                    color = Color.Black,
++                    color = modalTitle,
+                     fontSize = 16.sp,
+                     fontWeight = FontWeight.Bold,
+                     textAlign = TextAlign.Center,
+@@ -484,7 +494,7 @@ fun ModalContent(
+                 ) {
+                     Text(
+                         text = content,
+-                        color = Color(0xFF7F7F7F),
++                        color = modalContent,
+                         fontSize = 16.sp,
+                         textAlign = TextAlign.Center,
+                         modifier = Modifier.fillMaxWidth()
+@@ -496,7 +506,7 @@ fun ModalContent(
+                 modifier = Modifier
+                     .height(1.dp)
+                     .fillMaxWidth(),
+-                color = Color.LightGray
++                color = modalDivider
+             )
+ 
+             // Buttons
+@@ -515,7 +525,7 @@ fun ModalContent(
+                     ) {
+                         Text(
+                             text = cancelText.take(4),
+-                            color = cancelColor,
++                            color = resolvedCancel,
+                             fontSize = 16.sp
+                         )
+                     }
+@@ -524,7 +534,7 @@ fun ModalContent(
+                         modifier = Modifier
+                             .width(1.dp)
+                             .fillMaxHeight(),
+-                        color = Color.LightGray
++                        color = modalDivider
+                     )
+                 }
+ 
+@@ -536,7 +546,7 @@ fun ModalContent(
+                 ) {
+                     Text(
+                         text = confirmText.take(4),
+-                        color = confirmColor,
++                        color = resolvedConfirm,
+                         fontSize = 16.sp
+                     )
+                 }
+diff --git a/android/dimina/src/main/kotlin/com/didi/dimina/ui/view/ActionSheet.kt b/android/dimina/src/main/kotlin/com/didi/dimina/ui/view/ActionSheet.kt
+index d7c31f8..e87d860 100644
+--- a/android/dimina/src/main/kotlin/com/didi/dimina/ui/view/ActionSheet.kt
++++ b/android/dimina/src/main/kotlin/com/didi/dimina/ui/view/ActionSheet.kt
+@@ -2,6 +2,7 @@ package com.didi.dimina.ui.view
+ 
+ import android.content.res.Configuration
+ import androidx.compose.foundation.clickable
++import androidx.compose.foundation.isSystemInDarkTheme
+ import androidx.compose.foundation.layout.Column
+ import androidx.compose.foundation.layout.fillMaxWidth
+ import androidx.compose.foundation.layout.padding
+@@ -38,12 +39,25 @@ fun ActionSheet(
+ ) {
+     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true) // 跳过部分展开状态
+     val scope = rememberCoroutineScope()
+-    
++
++    // 深浅色:原生壳层 chrome,跟系统深浅色走(微信语义)。itemColor 显式自定义色
++    // 仍尊重原值;仅默认黑(#000000)在深色下换成浅色文字,否则深色面板上不可读。
++    val dark = isSystemInDarkTheme()
++    val sheetContainer = if (dark) Color(0xFF1D1F27) else Color.White
++    val sheetDivider = if (dark) Color(0xFF2A2D34) else Color(0xFFF0F0F0)
++    val sheetGapDivider = if (dark) Color(0xFF16181D) else Color(0xFFF7F7F7)
++    val sheetCancelColor = if (dark) Color(0xFFE8EAED) else Color.Black
++    val labelsColor = if (dark && buttonLabelsColor.uppercase() == "#000000") {
++        Color(0xFFE8EAED)
++    } else {
++        Color(buttonLabelsColor.toColorInt())
++    }
++
+     ModalBottomSheet(
+         onDismissRequest = { onDismiss() },
+         sheetState = sheetState,
+         shape = RoundedCornerShape(topStart = 16.dp),
+-        containerColor = Color.White,
++        containerColor = sheetContainer,
+         dragHandle = { },
+     ) {
+         Column(
+@@ -68,7 +82,7 @@ fun ActionSheet(
+                     Text(
+                         text = label,
+                         fontSize = 16.sp,
+-                        color =  Color(buttonLabelsColor.toColorInt()),
++                        color = labelsColor,
+                         modifier = Modifier
+                             .fillMaxWidth()
+                             .clickable {
+@@ -84,18 +98,18 @@ fun ActionSheet(
+ 
+                     // Add a divider after each button except the last one
+                     if (index < buttonLabels.size - 1) {
+-                        HorizontalDivider(color = Color(0xFFF0F0F0), thickness = 1.dp)
++                        HorizontalDivider(color = sheetDivider, thickness = 1.dp)
+                     }
+                 }
+ 
+                 // Divider before the Cancel button
+-                HorizontalDivider(color = Color(0xFFF7F7F7), thickness = 4.dp)
++                HorizontalDivider(color = sheetGapDivider, thickness = 4.dp)
+ 
+                 // Cancel button
+                 Text(
+                     text = "取消",
+                     fontSize = 16.sp,
+-                    color = Color.Black,
++                    color = sheetCancelColor,
+                     modifier = Modifier
+                         .fillMaxWidth()
+                         .clickable {
+-- 
+2.50.1 (Apple Git-155)
+

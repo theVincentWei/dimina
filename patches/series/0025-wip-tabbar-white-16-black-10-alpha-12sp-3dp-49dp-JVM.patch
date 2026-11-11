@@ -1,0 +1,243 @@
+From 5121b17a6f1d2348d80869f0028329d64dd12d6f Mon Sep 17 00:00:00 2001
+From: Wei Mingchen <weimingchen1997@qq.com>
+Date: Wed, 11 Nov 2026 08:13:09 +0800
+Subject: [PATCH 25/25] =?UTF-8?q?wip(tabbar):=20=E4=B8=8A=E8=BE=B9?=
+ =?UTF-8?q?=E6=A1=86=E6=94=B9=E5=BE=AE=E4=BF=A1=E8=AF=AD=E4=B9=89=E4=BD=8E?=
+ =?UTF-8?q?=E5=AF=B9=E6=AF=94=E5=8F=91=E4=B8=9D=E7=BA=BF(white=2016%=20/?=
+ =?UTF-8?q?=20black=2010%=20alpha,=E5=8E=9F=E5=86=99=E6=AD=BB=E4=B8=8D?=
+ =?UTF-8?q?=E9=80=8F=E6=98=8E=E6=B7=B1=E8=89=B2=E4=B8=8B=E6=88=90=E5=88=BA?=
+ =?UTF-8?q?=E7=9C=BC=E7=99=BD=E7=BA=BF)+=20=E4=B8=89=E7=AB=AF=E6=A0=87?=
+ =?UTF-8?q?=E7=AD=BE=E8=A1=8C=E7=9B=92=E6=98=BE=E5=BC=8F=2012sp=20?=
+ =?UTF-8?q?=E8=A1=8C=E9=AB=98=E4=B8=8E=203dp=20=E9=97=B4=E8=B7=9D=E8=AE=A9?=
+ =?UTF-8?q?=2049dp=20=E8=A1=8C=E5=86=85=E5=B1=85=E4=B8=AD;=E6=96=B0?=
+ =?UTF-8?q?=E5=A2=9E=20JVM=20=E6=BA=90=E7=A0=81=E9=92=89=E4=BD=8F=E6=B5=8B?=
+ =?UTF-8?q?=E8=AF=95?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .../com/didi/dimina/ui/view/DiminaTabBar.kt   | 24 +++++++-
+ .../dimina/ui/view/DiminaTabBarLayoutTest.kt  | 57 +++++++++++++++++++
+ .../src/pages/miniApp/miniApp.ts              |  4 +-
+ .../src/main/ets/Components/DMPTabBar.ets     |  8 ++-
+ .../DMPTabBarContainerController.swift        | 19 ++++---
+ 5 files changed, 100 insertions(+), 12 deletions(-)
+ create mode 100644 android/dimina/src/test/java/com/didi/dimina/ui/view/DiminaTabBarLayoutTest.kt
+
+diff --git a/android/dimina/src/main/kotlin/com/didi/dimina/ui/view/DiminaTabBar.kt b/android/dimina/src/main/kotlin/com/didi/dimina/ui/view/DiminaTabBar.kt
+index 4fb2c8e..07a19bb 100644
+--- a/android/dimina/src/main/kotlin/com/didi/dimina/ui/view/DiminaTabBar.kt
++++ b/android/dimina/src/main/kotlin/com/didi/dimina/ui/view/DiminaTabBar.kt
+@@ -50,7 +50,14 @@ fun DiminaTabBar(
+     }
+ 
+     val backgroundColor = parseComposeColor(tabBarConfig.backgroundColor, Color.White)
+-    val borderColor = if (tabBarConfig.borderStyle == "white") Color.White else Color(0xFFE0E0E0)
++    // 微信语义的 tabBar 上边框是 0.5px 低对比发丝线：white 是压到很低对比的白，
++    // black 是近黑的细线。原来写死不透明 #FFFFFF / #E0E0E0：深色皮肤里 borderStyle
++    // 取 white 时会变成一条横贯全屏的刺眼白线，取 black 时 #E0E0E0 同样发亮。
++    val borderColor = if (tabBarConfig.borderStyle == "white") {
++        Color.White.copy(alpha = BORDER_ALPHA_WHITE)
++    } else {
++        Color.Black.copy(alpha = BORDER_ALPHA_BLACK)
++    }
+ 
+     Column(
+         modifier = modifier
+@@ -134,12 +141,17 @@ private fun DiminaTabBarItem(
+                 Spacer(modifier = Modifier.size(24.dp))
+             }
+ 
+-            Spacer(modifier = Modifier.height(2.dp))
++            Spacer(modifier = Modifier.height(3.dp))
+ 
+             Text(
+                 text = item.text,
+                 color = textColor,
+                 fontSize = 10.sp,
++                // 不写 lineHeight 会继承 Material3 正文的 ~24sp 行盒：24dp 图标 + 3dp
++                // + 24dp 行盒远超 49dp 的行高，内容被顶到上边框——图标几乎贴住白线、
++                // 上下留白不对称（真机实测白线到图标只有 0.8dp）。显式行高后整块
++                // ≈39dp，在 49dp 行里居中，白线到图标 ≈5dp，与微信原生 TabBar 一致。
++                lineHeight = 12.sp,
+                 maxLines = 1,
+                 textAlign = TextAlign.Center,
+                 overflow = TextOverflow.Ellipsis,
+@@ -174,6 +186,14 @@ private fun DiminaTabBarItem(
+     }
+ }
+ 
++/**
++ * 上边框发丝线的透明度。微信原生 TabBar 的上边框在浅色下实测是 #DEDEE0（白底上
++ * 相当于约 13% 的黑），深色下用 white 时同样是低对比的一线提亮；不透明 #FFFFFF /
++ * #E0E0E0 会把它画成一条横贯全屏的白线。
++ */
++private const val BORDER_ALPHA_WHITE = 0.16f
++private const val BORDER_ALPHA_BLACK = 0.10f
++
+ private fun parseComposeColor(value: String, fallback: Color): Color {
+     return try {
+         Color(value.toColorInt())
+diff --git a/android/dimina/src/test/java/com/didi/dimina/ui/view/DiminaTabBarLayoutTest.kt b/android/dimina/src/test/java/com/didi/dimina/ui/view/DiminaTabBarLayoutTest.kt
+new file mode 100644
+index 0000000..2eeda0d
+--- /dev/null
++++ b/android/dimina/src/test/java/com/didi/dimina/ui/view/DiminaTabBarLayoutTest.kt
+@@ -0,0 +1,57 @@
++package com.didi.dimina.ui.view
++
++import org.junit.Assert.assertTrue
++import org.junit.Test
++import java.io.File
++
++/**
++ * Pins the native TabBar item layout that all three platforms share (24dp icon + 3dp + a
++ * 10sp/12sp label inside a 49dp row) and the low-contrast hairline border.
++ *
++ * 背景：标签的 `Text` 一旦漏掉显式 `lineHeight`，就会继承 Material3 正文的 ~24sp 行盒，
++ * `24dp 图标 + 3dp + 24dp 行盒` 直接撑满 49dp 行——图标被顶到上边框、上下留白不对称
++ * （真机实测白线到图标只有 0.8dp）。这些数字是视觉修复的一部分，改它们必须是有意的。
++ *
++ * 断言读源码文本：本模块的 JVM 单测没有 Android 运行时，渲染不了的布局只能这样钉住。
++ */
++class DiminaTabBarLayoutTest {
++
++    private val source: String by lazy {
++        val relative = "src/main/kotlin/com/didi/dimina/ui/view/DiminaTabBar.kt"
++        val found = listOf(relative, "dimina/$relative").map(::File).firstOrNull(File::isFile)
++            ?: throw AssertionError(
++                "DiminaTabBar.kt not found from working directory ${File(".").absolutePath}; " +
++                    "tried ${listOf(relative, "dimina/$relative")}.",
++            )
++        found.readText()
++    }
++
++    @Test
++    fun `label keeps an explicit line height so the item block fits the 49dp row`() {
++        assertTrue(
++            "tab label must set lineHeight explicitly, otherwise it inherits the ~24sp body line box",
++            source.contains("lineHeight = 12.sp"),
++        )
++        assertTrue(
++            "icon→label spacer must stay at 3dp",
++            source.contains("Modifier.height(3.dp)"),
++        )
++        assertTrue(
++            "tab row must stay 49dp",
++            source.contains(".height(49.dp)"),
++        )
++    }
++
++    @Test
++    fun `top border is a translucent hairline instead of an opaque white bar`() {
++        assertTrue(
++            "border color must be built from the alpha constants",
++            source.contains("BORDER_ALPHA_WHITE") && source.contains("BORDER_ALPHA_BLACK"),
++        )
++        // 不透明 #FFFFFF / #E0E0E0 正是当初深色 tabBar 上那条刺眼白线的来源,别再写回来
++        assertTrue(
++            "opaque #E0E0E0 border must not come back",
++            !source.contains("0xFFE0E0E0"),
++        )
++    }
++}
+diff --git a/fe/packages/container-sdk/src/pages/miniApp/miniApp.ts b/fe/packages/container-sdk/src/pages/miniApp/miniApp.ts
+index 7f472c2..151da1d 100644
+--- a/fe/packages/container-sdk/src/pages/miniApp/miniApp.ts
++++ b/fe/packages/container-sdk/src/pages/miniApp/miniApp.ts
+@@ -1881,7 +1881,9 @@ export class MiniApp {
+ 	}
+ 
+ 	_getTabBarBorderColor(borderStyle?: string): string {
+-		return borderStyle === 'white' ? '#ffffff' : '#e0e0e0'
++		// 与三端原生同值：微信原生 TabBar 的上边框是低对比发丝线，
++		// 不透明 #fff / #e0e0e0 在深色 tabBar 上会变成一条刺眼白线。
++		return borderStyle === 'white' ? 'rgba(255, 255, 255, 0.16)' : 'rgba(0, 0, 0, 0.10)'
+ 	}
+ 
+ 	/**
+diff --git a/harmony/dimina/src/main/ets/Components/DMPTabBar.ets b/harmony/dimina/src/main/ets/Components/DMPTabBar.ets
+index bb532b6..6c6f522 100644
+--- a/harmony/dimina/src/main/ets/Components/DMPTabBar.ets
++++ b/harmony/dimina/src/main/ets/Components/DMPTabBar.ets
+@@ -16,7 +16,7 @@ export struct DMPTabBarItemView {
+ 
+   build() {
+     Stack() {
+-      Column({ space: 2 }) {
++      Column({ space: 3 }) {
+         // Icon
+         if (this.isSelected && this.item.selectedIconPath) {
+           Image(this.item.selectedIconPath)
+@@ -36,6 +36,8 @@ export struct DMPTabBarItemView {
+         // Text
+         Text(this.item.text)
+           .fontSize(10)
++          // 显式行高：默认行盒比字形高，会把图标顶到上边框（贴住白线）
++          .lineHeight(12)
+           .fontColor(this.isSelected ? this.selectedColor : this.color)
+           .maxLines(1)
+           .textOverflow({ overflow: TextOverflow.Ellipsis })
+@@ -85,7 +87,9 @@ export struct DMPTabBar {
+   onTabSelected?: (index: number) => void;
+ 
+   private getBorderColor(): string {
+-    return this.tabBarConfig.borderStyle === 'white' ? '#FFFFFF' : '#E0E0E0';
++    // 微信原生 TabBar 的上边框是低对比发丝线（浅色下实测 #DEDEE0 ≈ 10% 黑）。
++    // 原来写死不透明 #FFFFFF / #E0E0E0，深色 tabBar 上会变成一条刺眼白线。
++    return this.tabBarConfig.borderStyle === 'white' ? '#29FFFFFF' : '#1A000000';
+   }
+ 
+   private getBackgroundColor(): string {
+diff --git a/iOS/dimina/DiminaKit/Container/DMPTabBarContainerController.swift b/iOS/dimina/DiminaKit/Container/DMPTabBarContainerController.swift
+index 5d480ff..e609dec 100644
+--- a/iOS/dimina/DiminaKit/Container/DMPTabBarContainerController.swift
++++ b/iOS/dimina/DiminaKit/Container/DMPTabBarContainerController.swift
+@@ -352,13 +352,20 @@ private final class DMPTabBarView: UIView {
+         fatalError("init(coder:) has not been implemented")
+     }
+ 
++    /// 微信原生 TabBar 的上边框是低对比发丝线：浅色下实测 #DEDEE0（白底上约 10% 黑）。
++    /// 原来写死不透明 .white / #E0E0E0，在深色 tabBar 上会变成一条横贯全屏的白线。
++    static func borderColor(for borderStyle: String) -> UIColor {
++        if borderStyle == "white" {
++            return UIColor.white.withAlphaComponent(0.16)
++        }
++        return UIColor.black.withAlphaComponent(0.10)
++    }
++
+     private func setup() {
+         backgroundColor = DMPUtil.colorFromHexString(config.backgroundColor) ?? .white
+ 
+         borderView.translatesAutoresizingMaskIntoConstraints = false
+-        borderView.backgroundColor = config.borderStyle == "white"
+-            ? .white
+-            : UIColor(red: 224 / 255, green: 224 / 255, blue: 224 / 255, alpha: 1)
++        borderView.backgroundColor = Self.borderColor(for: config.borderStyle)
+ 
+         stackView.translatesAutoresizingMaskIntoConstraints = false
+         stackView.axis = .horizontal
+@@ -405,9 +412,7 @@ private final class DMPTabBarView: UIView {
+     func updateStyle(config: DMPTabBarConfig) {
+         self.config = config
+         backgroundColor = DMPUtil.colorFromHexString(config.backgroundColor) ?? .white
+-        borderView.backgroundColor = config.borderStyle == "white"
+-            ? .white
+-            : UIColor(red: 224 / 255, green: 224 / 255, blue: 224 / 255, alpha: 1)
++        borderView.backgroundColor = Self.borderColor(for: config.borderStyle)
+ 
+         let normalColor = DMPUtil.colorFromHexString(config.color) ?? UIColor(white: 0.6, alpha: 1)
+         let selectedColor = DMPUtil.colorFromHexString(config.selectedColor) ?? .systemBlue
+@@ -482,7 +487,7 @@ private final class DMPTabBarItemControl: UIControl {
+         stackView.translatesAutoresizingMaskIntoConstraints = false
+         stackView.axis = .vertical
+         stackView.alignment = .center
+-        stackView.spacing = 2
++        stackView.spacing = 3
+         stackView.isUserInteractionEnabled = false
+ 
+         imageView.contentMode = .scaleAspectFit
+-- 
+2.50.1 (Apple Git-155)
+

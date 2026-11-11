@@ -1,0 +1,132 @@
+From 00bebf48bbccd645989fbad8f58c10e565485a51 Mon Sep 17 00:00:00 2001
+From: Wei Mingchen <weimingchen1997@qq.com>
+Date: Mon, 9 Nov 2026 23:58:37 +0800
+Subject: [PATCH 14/25] =?UTF-8?q?feat:MiniProgram=20=E6=96=B0=E5=A2=9E=20i?=
+ =?UTF-8?q?conPng=20=E5=AD=97=E6=AE=B5,=E8=8F=9C=E5=8D=95=E5=BC=B9?=
+ =?UTF-8?q?=E5=B1=82=E5=A4=B4=E9=83=A8=E4=BC=98=E5=85=88=E6=B8=B2=E6=9F=93?=
+ =?UTF-8?q?=E5=AE=BF=E4=B8=BB=E5=9B=BE=E6=A0=87(=E6=A1=8C=E9=9D=A2/?=
+ =?UTF-8?q?=E5=B8=82=E5=9C=BA=E5=90=8C=E6=AC=BE),=E6=97=A0=E5=88=99?=
+ =?UTF-8?q?=E5=9B=9E=E8=90=BD=E9=A6=96=E5=AD=97=E6=AF=8D=E7=93=A6=E7=89=87?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .../com/didi/dimina/bean/MiniProgram.kt       |  5 ++++
+ .../dimina/ui/container/DiminaActivity.kt     | 30 +++++++++++++++----
+ 2 files changed, 29 insertions(+), 6 deletions(-)
+
+diff --git a/android/dimina/src/main/kotlin/com/didi/dimina/bean/MiniProgram.kt b/android/dimina/src/main/kotlin/com/didi/dimina/bean/MiniProgram.kt
+index 0a36677..ab583d2 100644
+--- a/android/dimina/src/main/kotlin/com/didi/dimina/bean/MiniProgram.kt
++++ b/android/dimina/src/main/kotlin/com/didi/dimina/bean/MiniProgram.kt
+@@ -21,6 +21,9 @@ data class MiniProgram(
+     val referrerExtraData: String? = null,
+     /** Bundled packages currently represent the release environment only. */
+     val envVersion: String = "release",
++    /** 宿主渲染好的应用图标(桌面/市场同款字形的 PNG bytes);菜单弹层头部展示,
++     *  null=回落首字母瓦片。宿主侧随主题色离屏栅格化,SDK 不做字形复刻。 */
++    val iconPng: ByteArray? = null,
+ ) : Parcelable {
+ 
+     /** Keeps the original public seven-argument JVM constructor binary-compatible. */
+@@ -58,6 +61,7 @@ data class MiniProgram(
+         openerAppId = parcel.readString(),
+         referrerExtraData = parcel.readString(),
+         envVersion = parcel.readString() ?: "release",
++        iconPng = parcel.createByteArray(),
+     )
+ 
+     override fun writeToParcel(parcel: Parcel, flags: Int) {
+@@ -72,6 +76,7 @@ data class MiniProgram(
+         parcel.writeString(openerAppId)
+         parcel.writeString(referrerExtraData)
+         parcel.writeString(envVersion)
++        parcel.writeByteArray(iconPng)
+     }
+ 
+     // 描述内容，通常返回 0
+diff --git a/android/dimina/src/main/kotlin/com/didi/dimina/ui/container/DiminaActivity.kt b/android/dimina/src/main/kotlin/com/didi/dimina/ui/container/DiminaActivity.kt
+index 9dd41ba..e09a5f0 100644
+--- a/android/dimina/src/main/kotlin/com/didi/dimina/ui/container/DiminaActivity.kt
++++ b/android/dimina/src/main/kotlin/com/didi/dimina/ui/container/DiminaActivity.kt
+@@ -35,11 +35,13 @@ import androidx.compose.animation.core.tween
+ import androidx.compose.animation.fadeOut
+ import androidx.compose.foundation.BorderStroke
+ import androidx.compose.foundation.Canvas
++import androidx.compose.foundation.Image
+ import androidx.compose.foundation.background
+ import androidx.compose.foundation.border
+ import androidx.compose.foundation.clickable
+ import androidx.compose.foundation.gestures.awaitEachGesture
+ import androidx.compose.foundation.isSystemInDarkTheme
++import android.graphics.BitmapFactory
+ import androidx.compose.foundation.layout.Arrangement
+ import androidx.compose.foundation.layout.Box
+ import androidx.compose.foundation.layout.Column
+@@ -97,6 +99,7 @@ import androidx.compose.ui.geometry.Offset
+ import androidx.compose.ui.geometry.Size
+ import androidx.compose.ui.graphics.Color
+ import androidx.compose.ui.graphics.Path
++import androidx.compose.ui.graphics.asImageBitmap
+ import androidx.compose.ui.graphics.drawscope.Stroke
+ import androidx.compose.ui.graphics.vector.ImageVector
+ import androidx.compose.ui.graphics.toArgb
+@@ -1933,6 +1936,7 @@ class DiminaActivity : ComponentActivity() {
+                 appName = miniProgram.name.ifBlank {
+                     navigationBarTitle.value.ifBlank { "小程序" }
+                 },
++                iconPng = miniProgram.iconPng,
+                 onReenterClick = {
+                     showMiniProgramMenu.value = false
+                     reenterMiniProgram()
+@@ -2576,6 +2580,7 @@ class DiminaActivity : ComponentActivity() {
+     @Composable
+     private fun MiniProgramMenuSheet(
+         appName: String,
++        iconPng: ByteArray?,
+         onReenterClick: () -> Unit,
+         onCloseClick: () -> Unit,
+         onDismiss: () -> Unit
+@@ -2594,6 +2599,10 @@ class DiminaActivity : ComponentActivity() {
+         val sheetDividerTop = if (dark) Color(0xFF2A2D34) else Color(0xFFF2F2F2)
+         val sheetDividerBottom = if (dark) Color(0xFF2A2D34) else Color(0xFFEDEDED)
+         val sheetCancel = if (dark) Color(0xFF7D90B8) else Color(0xFF576B95)
++        // 头部图标:宿主传入的 PNG(桌面/市场同款字形)优先,无则回落首字母瓦片
++        val headerIcon = remember(iconPng) {
++            iconPng?.let { runCatching { BitmapFactory.decodeByteArray(it, 0, it.size) }.getOrNull() }
++        }
+         val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+         ModalBottomSheet(
+             onDismissRequest = onDismiss,
+@@ -2616,12 +2625,21 @@ class DiminaActivity : ComponentActivity() {
+                             .background(sheetIconBg),
+                         contentAlignment = Alignment.Center
+                     ) {
+-                        Text(
+-                            text = appName.take(1).ifBlank { "小" },
+-                            fontSize = 18.sp,
+-                            color = sheetAvatar,
+-                            fontWeight = FontWeight.Medium
+-                        )
++                        val header = headerIcon
++                        if (header != null) {
++                            Image(
++                                bitmap = header.asImageBitmap(),
++                                contentDescription = appName,
++                                modifier = Modifier.fillMaxSize()
++                            )
++                        } else {
++                            Text(
++                                text = appName.take(1).ifBlank { "小" },
++                                fontSize = 18.sp,
++                                color = sheetAvatar,
++                                fontWeight = FontWeight.Medium
++                            )
++                        }
+                     }
+                     Column(modifier = Modifier.padding(start = 14.dp)) {
+                         Text(
+-- 
+2.50.1 (Apple Git-155)
+

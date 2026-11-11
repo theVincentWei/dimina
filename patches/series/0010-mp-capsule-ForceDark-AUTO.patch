@@ -1,0 +1,542 @@
+From d710647068ec43e55089f1bd81ee0aadcb1854f8 Mon Sep 17 00:00:00 2001
+From: Wei Mingchen <weimingchen1997@qq.com>
+Date: Mon, 9 Nov 2026 22:02:28 +0800
+Subject: [PATCH 10/25] =?UTF-8?q?=E9=9B=86=E6=88=90:=E8=83=B6=E5=9B=8A?=
+ =?UTF-8?q?=E5=BE=AE=E4=BF=A1=E5=8C=96+=E5=9E=82=E7=9B=B4=E5=B1=85?=
+ =?UTF-8?q?=E4=B8=AD=E5=90=8C=E6=BA=90=E9=94=9A=E7=82=B9(mp-capsule)+Force?=
+ =?UTF-8?q?Dark=20AUTO=20=E8=AF=AD=E4=B9=89=E4=BF=AE=E6=AD=A3?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 胶囊偏下根因:垂直锚点走 Utils.statusBarHeight(px→dp round+资源兜底)+16dp
+  第二通道,与 M3 标题栏的 systemBars∪displayCutout 精确 inset 通道分歧
+  (rounding/兜底/remember 缓存 key 只挂 statusBars),深刘海机放大漂移
+  (真机量测:胶囊中线 220.5px vs 标题中线 222px)
+- 修复:锚点改与标题栏同源(systemBars∪displayCutout 顶缘 + (64-32)/2=16dp),
+  展开态与收起把手共用,胶囊中线 ≡ 标题中线
+- 微信化:新增 CapsuleStyle.kt——底=导航栏解析色 @0.66 半透明 scrim 透出
+  导航栏,图标随 navigationBarTextStyle(black/white,与标题同源 state),
+  描边/中缝由图标色派生;深浅色切换随 capsuleThemeTick 实时刷新
+- updateCapsuleTheme 退位:仅作菜单面板深浅标记,实底覆写删除;
+  新增 capsuleColorsExplicit,宿主显式配色完全接管优先级最高
+- ForceDark 语义修正:AUTO(跟随 app uiMode)替代 ON(无条件反转,
+  浅色系统下页面被误染黑,实测踩坑)
+- 触摸契约(菜单/关闭/收起把手/6s 自动展开)保留
+- 测试:CapsuleStyleTest 7 例 + DiminaActivityCapsuleWiringTest 7 例 source-pin
+- docs/Host-Package-Management.md 补「胶囊默认配色(微信语义)」小节
+---
+ .../src/main/kotlin/com/didi/dimina/Dimina.kt |  38 +++--
+ .../com/didi/dimina/common/CapsuleStyle.kt    |  54 +++++++
+ .../dimina/ui/container/DiminaActivity.kt     |  66 +++++++--
+ .../didi/dimina/common/CapsuleStyleTest.kt    |  65 +++++++++
+ .../DiminaActivityCapsuleWiringTest.kt        | 138 ++++++++++++++++++
+ docs/Host-Package-Management.md               |   4 +
+ 6 files changed, 343 insertions(+), 22 deletions(-)
+ create mode 100644 android/dimina/src/main/kotlin/com/didi/dimina/common/CapsuleStyle.kt
+ create mode 100644 android/dimina/src/test/java/com/didi/dimina/common/CapsuleStyleTest.kt
+ create mode 100644 android/dimina/src/test/java/com/didi/dimina/ui/container/DiminaActivityCapsuleWiringTest.kt
+
+diff --git a/android/dimina/src/main/kotlin/com/didi/dimina/Dimina.kt b/android/dimina/src/main/kotlin/com/didi/dimina/Dimina.kt
+index f3c8f6a..4883faa 100644
+--- a/android/dimina/src/main/kotlin/com/didi/dimina/Dimina.kt
++++ b/android/dimina/src/main/kotlin/com/didi/dimina/Dimina.kt
+@@ -57,6 +57,9 @@ class Dimina private constructor(context: Context) {
+         val showCapsule: Boolean = builder.showCapsule
+         @ColorInt val capsuleBackgroundColor: Int = builder.capsuleBackgroundColor
+         @ColorInt val capsuleIconColor: Int = builder.capsuleIconColor
++
++        /** 宿主是否显式设置过胶囊颜色;false=容器按微信语义自适应(CapsuleStyle)。 */
++        val capsuleColorsExplicit: Boolean = builder.capsuleColorsExplicit
+         val enableMultiTask: Boolean = builder.enableMultiTask
+         val showLaunchLoading: Boolean = builder.showLaunchLoading
+         val debugMode: Boolean = builder.debugMode
+@@ -73,13 +76,20 @@ class Dimina private constructor(context: Context) {
+             var showCapsule: Boolean = true
+             fun setShowCapsule(show: Boolean): Builder { showCapsule = show; return this }
+ 
++            // 宿主显式配置过任一胶囊颜色 → 容器停用微信默认语义(半透明 scrim + 图标随
++            // navigationBarTextStyle),改为完全使用宿主给定的颜色(可自带 alpha)。
++            internal var capsuleColorsExplicit: Boolean = false
++                private set
++
+             @ColorInt
+             internal var capsuleBackgroundColor: Int = Color.WHITE
+                 private set
+ 
+-            /** Sets the capsule fill to an ARGB color. Configure before [Dimina.init]. */
++            /** Sets the capsule fill to an ARGB color. Configure before [Dimina.init].
++             *  显式配置后胶囊底色固定用该值(微信默认语义停用)。 */
+             fun setCapsuleBackgroundColor(@ColorInt color: Int): Builder {
+                 capsuleBackgroundColor = color
++                capsuleColorsExplicit = true
+                 return this
+             }
+ 
+@@ -87,9 +97,11 @@ class Dimina private constructor(context: Context) {
+             internal var capsuleIconColor: Int = 0xFF1F1F1F.toInt()
+                 private set
+ 
+-            /** Sets both capsule icons to an ARGB color. Configure before [Dimina.init]. */
++            /** Sets both capsule icons to an ARGB color. Configure before [Dimina.init].
++             *  显式配置后图标色固定用该值(不再随 navigationBarTextStyle 自适应)。 */
+             fun setCapsuleIconColor(@ColorInt color: Int): Builder {
+                 capsuleIconColor = color
++                capsuleColorsExplicit = true
+                 return this
+             }
+ 
+@@ -237,28 +249,30 @@ class Dimina private constructor(context: Context) {
+ 
+     fun shouldShowCapsule(): Boolean = config.showCapsule
+ 
+-    // 宿主主题感知(dsh-go 容器按亮度注入):运行时可覆写的胶囊配色,null=用 init 配置。
++    // 系统深浅色标记:仅驱动菜单等面板配色(isCapsuleThemeDark)。胶囊本体的配色已改
++    // 微信语义(半透明 scrim 透出导航栏 + 图标随 navigationBarTextStyle,见 CapsuleStyle),
++    // 随容器主题重组自动适应,不再吃运行时实底覆写。
+     private var capsuleDarkOverride: Boolean? = null
+-    private var capsuleBgOverride: Int? = null
+-    private var capsuleIconOverride: Int? = null
+ 
+-    /** 运行时更新胶囊主题(深色=深底白图标,浅色=白底深图标);下一次重组生效。
+-     *  颜色必须显式存:不能在 false 分支回落 config——config 里的颜色是 init 时
+-     *  按当时的亮度定死的,回落会让「切浅色」永远切不出去。 */
++    /** 运行时标记胶囊主题深浅(菜单等面板配色跟它走)。胶囊本体配色不再由该方法决定:
++     *  默认=导航栏解析色半透明 scrim + 图标随 navigationBarTextStyle 自适应(微信语义,
++     *  对所有小程序一致,与是否声明 darkmode 无关);仅当宿主通过 Builder 显式配置过
++     *  setCapsuleBackgroundColor/setCapsuleIconColor 时才使用宿主颜色。 */
+     fun updateCapsuleTheme(dark: Boolean) {
+         capsuleDarkOverride = dark
+-        capsuleBgOverride = if (dark) 0xFF2A2D34.toInt() else android.graphics.Color.WHITE
+-        capsuleIconOverride = if (dark) 0xFFFFFFFF.toInt() else 0xFF1F1F1F.toInt()
+     }
+ 
+     /** 当前胶囊主题是否深色(菜单等面板配色跟它走)。 */
+     fun isCapsuleThemeDark(): Boolean = capsuleDarkOverride ?: false
+ 
+     @ColorInt
+-    internal fun getCapsuleBackgroundColor(): Int = capsuleBgOverride ?: config.capsuleBackgroundColor
++    internal fun getCapsuleBackgroundColor(): Int = config.capsuleBackgroundColor
+ 
+     @ColorInt
+-    internal fun getCapsuleIconColor(): Int = capsuleIconOverride ?: config.capsuleIconColor
++    internal fun getCapsuleIconColor(): Int = config.capsuleIconColor
++
++    /** 宿主是否显式配置过胶囊颜色;false=走微信默认语义(CapsuleStyle)。 */
++    internal fun hasExplicitCapsuleColors(): Boolean = config.capsuleColorsExplicit
+ 
+     /** Queries installed disk contents, not whether a runtime is currently alive. */
+     fun isExistsApp(appId: String): Boolean = getAppVersionInfo(appId) != null
+diff --git a/android/dimina/src/main/kotlin/com/didi/dimina/common/CapsuleStyle.kt b/android/dimina/src/main/kotlin/com/didi/dimina/common/CapsuleStyle.kt
+new file mode 100644
+index 0000000..59e0f60
+--- /dev/null
++++ b/android/dimina/src/main/kotlin/com/didi/dimina/common/CapsuleStyle.kt
+@@ -0,0 +1,54 @@
++package com.didi.dimina.common
++
++import androidx.annotation.ColorInt
++
++/**
++ * 胶囊(···|◎)微信语义配色。
++ *
++ * 微信真实行为:胶囊是一个半透明层,透出页面导航栏背景色(视觉上随小程序
++ * navigationBarBackgroundColor 变化);图标颜色跟小程序声明的
++ * navigationBarTextStyle(black/white)自适应;位置右上角垂直居中。
++ * 微信对所有小程序一致,与是否声明 darkmode 无关。
++ *
++ * 全部是 ARGB int 纯函数,可在 JVM 单测;Compose 侧用 Color.toArgb()/Color(int) 换转。
++ * 优先级:宿主显式配置(setCapsuleBackgroundColor/setCapsuleIconColor)> 微信默认语义。
++ */
++object CapsuleStyle {
++
++    /** 胶囊底=导航栏解析色 @ 此 alpha(半透明 scrim 透出导航栏)。微信观感约 60-75%,取中间值。 */
++    const val NAV_BAR_SCRIM_ALPHA: Float = 0.66f
++
++    /** 胶囊 hairline 描边:随图标色(深图标≈浅灰描边,白图标≈半透明白描边)。 */
++    const val BORDER_ALPHA: Float = 0.15f
++
++    /** 中缝分隔线:比描边略实一点。 */
++    const val SEPARATOR_ALPHA: Float = 0.2f
++
++    /** 胶囊底色:宿主显式配置优先(可自带 alpha);默认=导航栏解析色 @ scrim alpha。 */
++    @ColorInt
++    fun backgroundColor(@ColorInt navBarColor: Int, @ColorInt explicit: Int?): Int =
++        explicit ?: applyAlpha(navBarColor, NAV_BAR_SCRIM_ALPHA)
++
++    /** 图标色:宿主显式配置优先;默认跟 navigationBarTextStyle(white→浅色图标,否则深色图标)。 */
++    @ColorInt
++    fun iconColor(textStyleWhite: Boolean, @ColorInt explicit: Int?): Int =
++        explicit ?: if (textStyleWhite) WHITE_ICON else DARK_ICON
++
++    @ColorInt
++    fun borderColor(@ColorInt iconColor: Int): Int = applyAlpha(iconColor, BORDER_ALPHA)
++
++    @ColorInt
++    fun separatorColor(@ColorInt iconColor: Int): Int = applyAlpha(iconColor, SEPARATOR_ALPHA)
++
++    /** 深色图标(navigationBarTextStyle=black),与 DiminaConfig 默认图标色一致。 */
++    @ColorInt
++    private val DARK_ICON = 0xFF1F1F1F.toInt()
++
++    @ColorInt
++    private val WHITE_ICON = 0xFFFFFFFF.toInt()
++
++    /** 保留 RGB,重写 alpha 通道(四舍五入到字节)。 */
++    @ColorInt
++    private fun applyAlpha(@ColorInt color: Int, alpha: Float): Int =
++        (color and 0xFFFFFF) or ((alpha * 255f + 0.5f).toInt().coerceIn(0, 255) shl 24)
++}
+diff --git a/android/dimina/src/main/kotlin/com/didi/dimina/ui/container/DiminaActivity.kt b/android/dimina/src/main/kotlin/com/didi/dimina/ui/container/DiminaActivity.kt
+index 20f1e2f..35b7c25 100644
+--- a/android/dimina/src/main/kotlin/com/didi/dimina/ui/container/DiminaActivity.kt
++++ b/android/dimina/src/main/kotlin/com/didi/dimina/ui/container/DiminaActivity.kt
+@@ -52,6 +52,7 @@ import androidx.compose.foundation.layout.height
+ import androidx.compose.foundation.layout.padding
+ import androidx.compose.foundation.layout.size
+ import androidx.compose.foundation.layout.statusBars
++import androidx.compose.foundation.layout.union
+ import androidx.compose.foundation.layout.width
+ import androidx.compose.foundation.shape.CircleShape
+ import androidx.compose.foundation.shape.RoundedCornerShape
+@@ -119,6 +120,7 @@ import com.didi.dimina.bean.PathInfo
+ import com.didi.dimina.bean.TabBarConfig
+ import com.didi.dimina.bean.TabBarItem
+ import com.didi.dimina.common.BundledResourcePolicy
++import com.didi.dimina.common.CapsuleStyle
+ import com.didi.dimina.common.LogUtils
+ import com.didi.dimina.common.MenuButtonLayout
+ import com.didi.dimina.common.PathUtils
+@@ -1023,7 +1025,9 @@ class DiminaActivity : ComponentActivity() {
+         WebSettingsCompat.setForceDark(
+             target.settings,
+             if (isDarkModeEnabled()) {
+-                WebSettingsCompat.FORCE_DARK_ON
++                // AUTO=跟随 app uiMode(深色系统才反转内容,浅色系统保持原样);
++                // ON 是无条件反转,浅色系统下会把页面也染黑——不能用(实测踩过)。
++                WebSettingsCompat.FORCE_DARK_AUTO
+             } else {
+                 WebSettingsCompat.FORCE_DARK_OFF
+             },
+@@ -2145,12 +2149,52 @@ class DiminaActivity : ComponentActivity() {
+                         statusBarHeight = currentWindowInfo.getInt("statusBarHeight"),
+                     )
+                 }
+-                // 主题 tick:resume/宿主注入时重读配色(updateCapsuleTheme 生效)。
+-                val capsuleBg = remember(capsuleThemeTick.intValue) {
+-                    Color(Dimina.getInstance().getCapsuleBackgroundColor())
++                // 胶囊垂直锚点与 CenterAlignedTopAppBar 的 windowInsets 同源:systemBars ∪
++                // displayCutout 的顶缘(compose 精确值;M3 内部即
++                // systemBarsForVisualComponents.only(Horizontal+Top))。M3 标题内容区高
++                // NAVIGATION_BAR_CONTENT_HEIGHT_DP(64dp),胶囊 HEIGHT_DP(32dp)垂直居中
++                // → 上缘再 +16dp,胶囊中线即标题中线。旧实现经 Utils.getMiniProgramSystemInfo
++                // 的 px→dp 往返(roundToInt,兜底还可能落到 status_bar_height 资源值)是
++                // 独立第二通道,四舍五入与 fallback 相对标题栏产生垂直漂移(用户反馈的
++                // 「胶囊偏下」);这里改成同源锚点后不再有第二通道。
++                val topBarInsetTop = ComposeWindowInsets.systemBars
++                    .union(ComposeWindowInsets.displayCutout)
++                    .asPaddingValues()
++                    .calculateTopPadding()
++                val capsuleTopPadding = topBarInsetTop +
++                    ((MenuButtonLayout.NAVIGATION_BAR_CONTENT_HEIGHT_DP - MenuButtonLayout.HEIGHT_DP) / 2).dp
++
++                // 微信语义配色:底=导航栏解析色半透明 scrim(透出导航栏,随页面
++                // navigationBarBackgroundColor 变化);图标=navigationBarTextStyle
++                // (black→深色,white→浅色,与标题同源,深浅色切换实时刷新)。
++                // 宿主显式配置过 Builder.setCapsuleBackgroundColor/setCapsuleIconColor
++                // 时优先用宿主颜色(可自带 alpha,微信默认语义停用)。remember 把
++                // compose 色值纳入 key:@ 变量解析/深浅色切换即时生效;tick 保留
++                // resume 后重读宿主配置的语义。
++                val capsuleBg = remember(
++                    capsuleThemeTick.intValue,
++                    navBarBgColor,
++                    navigationBarTextColor.value,
++                ) {
++                    Color(
++                        CapsuleStyle.backgroundColor(
++                            navBarColor = navBarBgColor.toArgb(),
++                            explicit = Dimina.getInstance().takeIf { it.hasExplicitCapsuleColors() }
++                                ?.getCapsuleBackgroundColor(),
++                        )
++                    )
+                 }
+-                val capsuleFg = remember(capsuleThemeTick.intValue) {
+-                    Color(Dimina.getInstance().getCapsuleIconColor())
++                val capsuleFg = remember(
++                    capsuleThemeTick.intValue,
++                    navigationBarTextColor.value,
++                ) {
++                    Color(
++                        CapsuleStyle.iconColor(
++                            textStyleWhite = navigationBarTextColor.value == Color.White,
++                            explicit = Dimina.getInstance().takeIf { it.hasExplicitCapsuleColors() }
++                                ?.getCapsuleIconColor(),
++                        )
++                    )
+                 }
+                 // 收起后 6s 空闲自动展开(契约式隐藏)。
+                 LaunchedEffect(capsuleCollapsed.value) {
+@@ -2164,7 +2208,7 @@ class DiminaActivity : ComponentActivity() {
+                     Box(
+                         modifier = Modifier
+                             .align(Alignment.TopEnd)
+-                            .padding(top = menuRect.top.dp)
++                            .padding(top = capsuleTopPadding)
+                             .zIndex(10f)
+                             .size(width = 18.dp, height = 40.dp)
+                             .clip(
+@@ -2201,7 +2245,7 @@ class DiminaActivity : ComponentActivity() {
+                         modifier = Modifier
+                             .align(Alignment.TopEnd)
+                             .padding(
+-                                top = menuRect.top.dp,
++                                top = capsuleTopPadding,
+                                 end = (windowInfo.getInt("windowWidth") - menuRect.right).dp
+                             )
+                             .zIndex(10f)
+@@ -2667,8 +2711,10 @@ class DiminaActivity : ComponentActivity() {
+         onCloseClick: () -> Unit,
+         modifier: Modifier = Modifier
+     ) {
+-        val borderColor = Color(0xFFE5E5E5)
+-        val separatorColor = Color(0xFFE9E9E9)
++        // 描边/中缝随图标色派生(微信观感:深图标≈浅灰 hairline,白图标≈半透明白),
++        // 半透明底上不固定灰——固定灰在深色导航栏上不可见。
++        val borderColor = Color(CapsuleStyle.borderColor(iconColor.toArgb()))
++        val separatorColor = Color(CapsuleStyle.separatorColor(iconColor.toArgb()))
+         val shape = RoundedCornerShape((MenuButtonLayout.HEIGHT_DP / 2).dp)
+ 
+         Box(
+diff --git a/android/dimina/src/test/java/com/didi/dimina/common/CapsuleStyleTest.kt b/android/dimina/src/test/java/com/didi/dimina/common/CapsuleStyleTest.kt
+new file mode 100644
+index 0000000..aced1ff
+--- /dev/null
++++ b/android/dimina/src/test/java/com/didi/dimina/common/CapsuleStyleTest.kt
+@@ -0,0 +1,65 @@
++package com.didi.dimina.common
++
++import org.junit.Assert.assertEquals
++import org.junit.Test
++
++/**
++ * CapsuleStyle(胶囊微信语义配色)纯函数契约:
++ * - 默认:底=导航栏解析色 @ 半透明 scrim(透出导航栏);图标随 navigationBarTextStyle。
++ * - 宿主显式配置(setCapsuleBackgroundColor/setCapsuleIconColor)永远优先,且原样保留 alpha。
++ */
++class CapsuleStyleTest {
++
++    private val navBarLight = 0xFFECECEC.toInt()
++    private val navBarDark = 0xFF191919.toInt()
++
++    @Test
++    fun `default background is nav bar color with scrim alpha`() {
++        val expectedAlpha = (CapsuleStyle.NAV_BAR_SCRIM_ALPHA * 255f + 0.5f).toInt()
++        val bg = CapsuleStyle.backgroundColor(navBarColor = navBarLight, explicit = null)
++        assertEquals(expectedAlpha, bg ushr 24 and 0xFF)
++        assertEquals(0xECECEC, bg and 0xFFFFFF)
++    }
++
++    @Test
++    fun `scrim keeps rgb so the nav bar color shows through`() {
++        val bg = CapsuleStyle.backgroundColor(navBarColor = navBarDark, explicit = null)
++        assertEquals(0x191919, bg and 0xFFFFFF)
++    }
++
++    @Test
++    fun `explicit background wins verbatim including alpha`() {
++        val translucentWhite = 0x80FFFFFF.toInt()
++        val bg = CapsuleStyle.backgroundColor(navBarColor = navBarLight, explicit = translucentWhite)
++        assertEquals(translucentWhite, bg)
++    }
++
++    @Test
++    fun `icon follows navigationBarTextStyle`() {
++        assertEquals(0xFFFFFFFF.toInt(), CapsuleStyle.iconColor(textStyleWhite = true, explicit = null))
++        assertEquals(0xFF1F1F1F.toInt(), CapsuleStyle.iconColor(textStyleWhite = false, explicit = null))
++    }
++
++    @Test
++    fun `explicit icon color wins verbatim`() {
++        assertEquals(0xFF123456.toInt(), CapsuleStyle.iconColor(textStyleWhite = true, explicit = 0xFF123456.toInt()))
++    }
++
++    @Test
++    fun `border and separator derive from icon color with fixed alphas`() {
++        val darkIcon = 0xFF1F1F1F.toInt()
++        val border = CapsuleStyle.borderColor(darkIcon)
++        val separator = CapsuleStyle.separatorColor(darkIcon)
++        assertEquals((CapsuleStyle.BORDER_ALPHA * 255f + 0.5f).toInt(), border ushr 24 and 0xFF)
++        assertEquals((CapsuleStyle.SEPARATOR_ALPHA * 255f + 0.5f).toInt(), separator ushr 24 and 0xFF)
++        assertEquals(0x1F1F1F, border and 0xFFFFFF)
++        assertEquals(0x1F1F1F, separator and 0xFFFFFF)
++    }
++
++    @Test
++    fun `scrim alpha stays within the wechat 60-75 percent band`() {
++        assert(CapsuleStyle.NAV_BAR_SCRIM_ALPHA in 0.60f..0.75f) {
++            "scrim alpha ${CapsuleStyle.NAV_BAR_SCRIM_ALPHA} must stay in the WeChat 60-75% band"
++        }
++    }
++}
+diff --git a/android/dimina/src/test/java/com/didi/dimina/ui/container/DiminaActivityCapsuleWiringTest.kt b/android/dimina/src/test/java/com/didi/dimina/ui/container/DiminaActivityCapsuleWiringTest.kt
+new file mode 100644
+index 0000000..dd726ec
+--- /dev/null
++++ b/android/dimina/src/test/java/com/didi/dimina/ui/container/DiminaActivityCapsuleWiringTest.kt
+@@ -0,0 +1,138 @@
++package com.didi.dimina.ui.container
++
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertTrue
++import org.junit.Test
++import java.io.File
++
++/**
++ * Pins the capsule (···|◎) wiring inside [DiminaActivity] and [com.didi.dimina.Dimina] that
++ * pure-JVM tests cannot see:
++ *
++ * - the capsule's vertical anchor is the SAME inset the Material3 app bar consumes
++ *   (systemBars ∪ displayCutout, compose-exact) so the capsule centerline == title centerline;
++ *   the old Utils px→dp round trip is a diverging second channel and must not come back;
++ * - the WeChat-style default: translucent scrim over the resolved nav bar color + icon color
++ *   from navigationBarTextStyle (real-time on theme flips, darkmode declared or not);
++ * - host-explicit capsule colors (Builder setters) keep the highest priority;
++ * - updateCapsuleTheme no longer carries solid capsule colors (menu panels only);
++ * - the touch contract (menu / close / collapse) is untouched.
++ *
++ * Assertions read the source text, same rationale as [DiminaActivityThemeWiringTest].
++ */
++class DiminaActivityCapsuleWiringTest {
++
++    private val activitySource: String by lazy {
++        val relative = "src/main/kotlin/com/didi/dimina/ui/container/DiminaActivity.kt"
++        val candidates = listOf(relative, "dimina/$relative").map(::File)
++        val found = candidates.firstOrNull(File::isFile)
++            ?: throw AssertionError("DiminaActivity.kt not found from ${File(".").absolutePath}")
++        found.readText()
++    }
++
++    private val diminaSource: String by lazy {
++        val relative = "src/main/kotlin/com/didi/dimina/Dimina.kt"
++        val candidates = listOf(relative, "dimina/$relative").map(::File)
++        val found = candidates.firstOrNull(File::isFile)
++            ?: throw AssertionError("Dimina.kt not found from ${File(".").absolutePath}")
++        found.readText()
++    }
++
++    @Test
++    fun `capsule vertical anchor is the same union inset the app bar consumes`() {
++        assertTrue(
++            "the capsule must anchor to systemBars.union(displayCutout) - the same top inset " +
++                "CenterAlignedTopAppBar applies via TopAppBarDefaults.windowInsets",
++            activitySource.contains("ComposeWindowInsets.systemBars") &&
++                activitySource.contains(".union(ComposeWindowInsets.displayCutout)"),
++        )
++        assertTrue(
++            "the vertical offset must center the capsule in the app bar content area " +
++                "((64 - 32) / 2 = 16dp below the inset top)",
++            activitySource.contains(
++                "(MenuButtonLayout.NAVIGATION_BAR_CONTENT_HEIGHT_DP - MenuButtonLayout.HEIGHT_DP) / 2).dp",
++            ),
++        )
++    }
++
++    @Test
++    fun `both capsule states consume the same-source vertical anchor`() {
++        val occurrences = Regex(Regex.escape("top = capsuleTopPadding")).findAll(activitySource).count()
++        assertTrue(
++            "expanded capsule and collapsed handle must both use capsuleTopPadding (got $occurrences)",
++            occurrences >= 2,
++        )
++        assertFalse(
++            "the old Utils-anchored vertical placement (menuRect.top) must not come back",
++            activitySource.contains("menuRect.top.dp"),
++        )
++    }
++
++    @Test
++    fun `default capsule colors follow the wechat semantics`() {
++        assertTrue(
++            "capsule fill must be a translucent scrim over the resolved nav bar color (CapsuleStyle)",
++            activitySource.contains("CapsuleStyle.backgroundColor(") &&
++                activitySource.contains("navBarColor = navBarBgColor.toArgb()"),
++        )
++        assertTrue(
++            "capsule icons must follow navigationBarTextStyle (white → light icon)",
++            activitySource.contains("CapsuleStyle.iconColor(") &&
++                activitySource.contains("navigationBarTextColor.value == Color.White"),
++        )
++    }
++
++    @Test
++    fun `host-explicit capsule colors keep the highest priority`() {
++        assertTrue(
++            "DiminaConfig must expose whether the host explicitly configured capsule colors",
++            diminaSource.contains("capsuleColorsExplicit"),
++        )
++        assertTrue(
++            "the capsule must consult hasExplicitCapsuleColors() before applying the WeChat default",
++            activitySource.contains("hasExplicitCapsuleColors()"),
++        )
++    }
++
++    @Test
++    fun `updateCapsuleTheme no longer carries solid capsule colors`() {
++        val bodyStart = diminaSource.indexOf("fun updateCapsuleTheme(dark: Boolean)")
++        assertTrue("updateCapsuleTheme must still exist for host compatibility", bodyStart >= 0)
++        val body = diminaSource.substring(bodyStart, bodyStart + 400)
++        assertFalse(
++            "updateCapsuleTheme must not set solid capsule colors (0xFF2A2D34/WHITE) anymore - " +
++                "the capsule adapts via navBarBgColor/navigationBarTextColor re-resolution",
++            body.contains("0xFF2A2D34") || body.contains("android.graphics.Color.WHITE"),
++        )
++        assertFalse(
++            "the solid bg/icon runtime overrides must be gone entirely",
++            diminaSource.contains("capsuleBgOverride") || diminaSource.contains("capsuleIconOverride"),
++        )
++    }
++
++    @Test
++    fun `border and separator derive from the icon color`() {
++        assertTrue(
++            "hairline border/separator must derive from CapsuleStyle so they stay visible on " +
++                "both light and dark nav bars",
++            activitySource.contains("CapsuleStyle.borderColor(iconColor.toArgb())") &&
++                activitySource.contains("CapsuleStyle.separatorColor(iconColor.toArgb())"),
++        )
++    }
++
++    @Test
++    fun `touch contract is preserved`() {
++        assertTrue(
++            "capsule more button must still open the mini program menu",
++            activitySource.contains("onMoreClick = {\n                            showMiniProgramMenu.value = true\n                        }"),
++        )
++        assertTrue(
++            "capsule close button must still hide the mini program",
++            activitySource.contains("onCloseClick = { hideMiniProgram() }"),
++        )
++        assertTrue(
++            "collapsed handle must still expand on tap",
++            activitySource.contains("clickable { capsuleCollapsed.value = false }"),
++        )
++    }
++}
+diff --git a/docs/Host-Package-Management.md b/docs/Host-Package-Management.md
+index be028bb..5cc6581 100644
+--- a/docs/Host-Package-Management.md
++++ b/docs/Host-Package-Management.md
+@@ -80,6 +80,10 @@ const info = await manager.installMiniProgram('demo', zipPath)
+ 
+ 胶囊默认显示。这是 SDK 全局启动配置，应在创建小程序页面前设置，不作为运行中动态显隐 API。隐藏后，使用默认导航栏的栈底页面会显示返回箭头，点击返回宿主（由其他小程序打开时返回上一个小程序）；子页面仍返回上一页。自定义导航栏页面需由宿主或业务提供退出入口，可使用既有 `closeMiniProgram` 或 `hideMiniProgram`。该配置只隐藏胶囊，不隐藏导航栏，不改变页面的系统安全区或 `getMenuButtonBoundingClientRect` 几何结果。
+ 
++### 胶囊默认配色（微信语义）
++
++宿主不配置胶囊颜色时，Android 容器按微信语义自适应：胶囊底是导航栏解析色加约 66% 不透明度的半透明层（透出导航栏，随页面 `navigationBarBackgroundColor` 变化，含 `@` 变量主题）；图标颜色跟随小程序声明的 `navigationBarTextStyle`（`black`→深色图标，`white`→浅色图标），与标题文字同源，系统深浅色切换实时刷新；描边与中缝分隔线由图标色按固定透明度派生。微信对所有小程序一致，与是否声明 darkmode 无关。运行时方法 `updateCapsuleTheme(dark)` 保留，但只标记深浅色供容器内菜单等面板使用，不再给胶囊本体下发实底配色。配置任一颜色（下文 `setCapsuleBackgroundColor` / `setCapsuleIconColor`）即停用该语义，胶囊完全使用宿主给定颜色。胶囊与标题栏垂直居中对齐：上缘 = 状态栏/刘海 insets（与 Material3 标题栏同源）+ 16dp。
++
+ ### 胶囊背景色
+ 
+ 宿主可在首次启动小程序前设置全局胶囊底色，默认不透明白色。下面三种写法都使用约 50% 不透明度的白色。透明度作用于填充色，图标、边框和点击区域保持原有行为。Android 和 iOS 在填充色不透明时保留默认阴影；半透明或全透明时不绘制阴影，避免底色叠加变暗。
+-- 
+2.50.1 (Apple Git-155)
+

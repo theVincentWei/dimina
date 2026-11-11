@@ -1,0 +1,12 @@
+diff --git a/iOS/dimina/DiminaKit/Container/Api/DMPContainerApi.swift b/iOS/dimina/DiminaKit/Container/Api/DMPContainerApi.swift
+index c7e18e7..e804039 100644
+--- a/iOS/dimina/DiminaKit/Container/Api/DMPContainerApi.swift
++++ b/iOS/dimina/DiminaKit/Container/Api/DMPContainerApi.swift
+@@ -79,6 +79,7 @@ public class DMPContainerApi: NSObject {
+         _ = NetworkTypeAPI(app: app)
+         _ = ScreenAPI(app: app)
+         _ = SettingAPI(app: app)
++        _ = SubscribeMessageAPI(app: app)
+         _ = PhoneAPI(app: app)
+         _ = VibrateAPI(app: app)
+         _ = ScanAPI(app: app)

@@ -1,0 +1,782 @@
+diff --git a/android/dimina/src/main/kotlin/com/didi/dimina/api/ApiRegistry.kt b/android/dimina/src/main/kotlin/com/didi/dimina/api/ApiRegistry.kt
+index b71d2d2..7a9b8ab 100644
+--- a/android/dimina/src/main/kotlin/com/didi/dimina/api/ApiRegistry.kt
++++ b/android/dimina/src/main/kotlin/com/didi/dimina/api/ApiRegistry.kt
+@@ -1,6 +1,7 @@
+ package com.didi.dimina.api
+ 
+ import com.didi.dimina.api.ext.ExtBridgeApi
++import com.didi.dimina.api.ext.ExtCallback
+ import com.didi.dimina.api.ext.ExtModuleHandler
+ import com.didi.dimina.common.ApiUtils
+ import com.didi.dimina.common.LogUtils
+@@ -42,6 +43,36 @@ class ApiRegistry {
+         LogUtils.d(tag, "Registered ext module: $moduleName")
+     }
+ 
++    /**
++     * 供原生 API handler 主动回调宿主扩展模块（一次性调用）。
++     *
++     * extModules 本身是私有的，原生 API 需要「把用户交互/状态查询交给宿主」时走这里，
++     * 而不是另开一份模块表。语义与 extBridge 的一次性调用一致：handler 处理完调用
++     * [ExtCallback]，不改变 extBridge / extOnBridge 既有的注册与路由行为。
++     *
++     * @return 是否找到了该 module 的 handler。false 表示宿主未注册（调用方应按失败处理，
++     *         调用方不要依赖 callback 一定被触发）。
++     */
++    fun invokeExtModule(
++        module: String,
++        event: String,
++        data: JSONObject = JSONObject(),
++        callback: ExtCallback,
++    ): Boolean {
++        val handler = extModules[module]
++        if (handler == null) {
++            LogUtils.e(tag, "invokeExtModule: module \"$module\" not registered")
++            return false
++        }
++        return try {
++            handler.handle(event, data, callback)
++            true
++        } catch (e: Exception) {
++            LogUtils.e(tag, "invokeExtModule error ($module/$event): ${e.message}")
++            false
++        }
++    }
++
+     /**
+      * Invokes an API
+      *
+diff --git a/android/dimina/src/main/kotlin/com/didi/dimina/api/openapi/SettingApi.kt b/android/dimina/src/main/kotlin/com/didi/dimina/api/openapi/SettingApi.kt
+index ad1f791..6acb80a 100644
+--- a/android/dimina/src/main/kotlin/com/didi/dimina/api/openapi/SettingApi.kt
++++ b/android/dimina/src/main/kotlin/com/didi/dimina/api/openapi/SettingApi.kt
+@@ -5,20 +5,30 @@ import android.content.pm.PackageManager
+ import android.os.Build
+ import androidx.core.content.ContextCompat
+ import com.didi.dimina.api.APIResult
++import com.didi.dimina.api.ApiRegistry
+ import com.didi.dimina.api.AsyncResult
+ import com.didi.dimina.api.BaseApiHandler
+ import com.didi.dimina.api.NoneResult
++import com.didi.dimina.api.ext.ExtCallback
+ import com.didi.dimina.common.ApiUtils
++import com.didi.dimina.common.LogUtils
+ import com.didi.dimina.ui.container.DiminaActivity
+ import org.json.JSONObject
++import java.util.concurrent.atomic.AtomicBoolean
+ 
+-class SettingApi : BaseApiHandler() {
++class SettingApi(
++    private val apiRegistry: ApiRegistry? = null,
++) : BaseApiHandler() {
+     private companion object {
+         const val GET_SETTING = "getSetting"
+         const val OPEN_SETTING = "openSetting"
+         const val AUTHORIZE = "authorize"
++        const val NOTIFY_MODULE = "dsh-notify"
++        const val EVENT_GET_SUBSCRIBE_STATE = "getSubscribeState"
+     }
+ 
++    private val tag = "SettingApi"
++
+     override val apiNames = setOf(GET_SETTING, OPEN_SETTING, AUTHORIZE)
+ 
+     override fun handleAction(
+@@ -28,9 +38,12 @@ class SettingApi : BaseApiHandler() {
+         params: JSONObject,
+         responseCallback: (String) -> Unit,
+     ): APIResult = when (apiName) {
+-        GET_SETTING -> AsyncResult(settingResult(activity, GET_SETTING), completeCarriesResult = true)
++        GET_SETTING -> {
++            emitSettingResult(activity, GET_SETTING, appId, params, responseCallback)
++            NoneResult()
++        }
+         AUTHORIZE -> authorize(activity, params, responseCallback)
+-        OPEN_SETTING -> openSetting(activity, params, responseCallback)
++        OPEN_SETTING -> openSetting(activity, appId, params, responseCallback)
+         else -> super.handleAction(activity, appId, apiName, params, responseCallback)
+     }
+ 
+@@ -55,13 +68,12 @@ class SettingApi : BaseApiHandler() {
+ 
+     private fun openSetting(
+         activity: DiminaActivity,
++        appId: String,
+         params: JSONObject,
+         responseCallback: (String) -> Unit,
+     ): APIResult {
+         val launched = activity.handleOpenAppSettings {
+-            val result = settingResult(activity, OPEN_SETTING)
+-            ApiUtils.invokeSuccess(params, result, responseCallback)
+-            ApiUtils.invokeComplete(params, responseCallback, result)
++            emitSettingResult(activity, OPEN_SETTING, appId, params, responseCallback)
+         }
+         if (!launched) {
+             return AsyncResult(JSONObject().apply { put("errMsg", "$OPEN_SETTING:fail settings already open") }, completeCarriesResult = true)
+@@ -69,6 +81,70 @@ class SettingApi : BaseApiHandler() {
+         return NoneResult()
+     }
+ 
++    /**
++     * getSetting / openSetting 的结果里带上 `subscriptionsSetting`（微信兼容形状）：
++     * `{mainSwitch, itemSettings:{tplId:'accept'|'reject'}}`。状态属于宿主，框架只在
++     * 宿主已注册 `dsh-notify` 扩展时读取；无宿主时给默认值（总开关开、无模板记录），
++     * 保证独立运行 Dimina 时 getSetting 仍然可用。
++     */
++    private fun emitSettingResult(
++        activity: DiminaActivity,
++        apiName: String,
++        appId: String,
++        params: JSONObject,
++        responseCallback: (String) -> Unit,
++    ) {
++        val result = settingResult(activity, apiName)
++        val registry = apiRegistry
++        if (registry == null) {
++            result.put("subscriptionsSetting", defaultSubscriptionsSetting())
++            ApiUtils.invokeSuccess(params, result, responseCallback)
++            ApiUtils.invokeComplete(params, responseCallback, result)
++            return
++        }
++
++        // 宿主可能同步回调；不论同步/异步/未注册，终态回调只发一次。
++        val resolved = AtomicBoolean(false)
++        fun finish(state: JSONObject?) {
++            if (!resolved.compareAndSet(false, true)) return
++            result.put("subscriptionsSetting", state ?: defaultSubscriptionsSetting())
++            ApiUtils.invokeSuccess(params, result, responseCallback)
++            ApiUtils.invokeComplete(params, responseCallback, result)
++        }
++
++        val handled = registry.invokeExtModule(
++            NOTIFY_MODULE,
++            EVENT_GET_SUBSCRIBE_STATE,
++            // appId 用于宿主按小程序取模板级 itemSettings；总开关 mainSwitch 是用户级。
++            JSONObject().apply { put("appId", appId) },
++            object : ExtCallback {
++                override fun onSuccess(result: JSONObject) {
++                    finish(normalizeSubscriptionsSetting(result))
++                }
++
++                override fun onFail(error: JSONObject) {
++                    LogUtils.w(tag, "getSubscribeState failed: $error")
++                    finish(null)
++                }
++            },
++        )
++        if (!handled) finish(null)
++    }
++
++    private fun defaultSubscriptionsSetting(): JSONObject = JSONObject().apply {
++        put("mainSwitch", true)
++        put("itemSettings", JSONObject())
++    }
++
++    private fun normalizeSubscriptionsSetting(source: JSONObject): JSONObject {
++        // 宿主按契约直接返回 {mainSwitch,itemSettings}；兼容包了一层 subscriptionsSetting 的实现。
++        val state = source.optJSONObject("subscriptionsSetting") ?: source
++        return JSONObject().apply {
++            put("mainSwitch", if (state.has("mainSwitch")) state.optBoolean("mainSwitch", true) else true)
++            put("itemSettings", state.optJSONObject("itemSettings") ?: JSONObject())
++        }
++    }
++
+     private fun settingResult(activity: DiminaActivity, apiName: String): JSONObject = JSONObject().apply {
+         val authSetting = JSONObject()
+         supportedScopes().forEach { scope ->
+diff --git a/android/dimina/src/main/kotlin/com/didi/dimina/api/openapi/SubscribeMessageApi.kt b/android/dimina/src/main/kotlin/com/didi/dimina/api/openapi/SubscribeMessageApi.kt
+new file mode 100644
+index 0000000..ce4a833
+--- /dev/null
++++ b/android/dimina/src/main/kotlin/com/didi/dimina/api/openapi/SubscribeMessageApi.kt
+@@ -0,0 +1,164 @@
++package com.didi.dimina.api.openapi
++
++import com.didi.dimina.api.APIResult
++import com.didi.dimina.api.ApiRegistry
++import com.didi.dimina.api.BaseApiHandler
++import com.didi.dimina.api.NoneResult
++import com.didi.dimina.api.ext.ExtCallback
++import com.didi.dimina.common.ApiUtils
++import com.didi.dimina.common.LogUtils
++import com.didi.dimina.ui.container.DiminaActivity
++import org.json.JSONArray
++import org.json.JSONObject
++import java.util.concurrent.atomic.AtomicBoolean
++
++/**
++ * 一次性模板消息订阅（微信兼容 API 面）。
++ *
++ * 框架职责只到「参数校验 + 桥给宿主 + 把宿主结果映射回微信形状」：
++ * 弹面板、记账、投递都不在这里，也不直接依赖任何宿主实现。
++ * 宿主通过 `Dimina.registerExtModule("dsh-notify", ...)` 注册 [ExtCallback] 处理器：
++ *  - `showSubscribePanel(data={appId,tmplIds})` → success `{results:{tplId:'accept'|'reject'}}`
++ *  - 非用户点击态 / 无宿主 → 走 fail（微信语义）。
++ */
++class SubscribeMessageApi(
++    private val apiRegistry: ApiRegistry,
++) : BaseApiHandler() {
++    private companion object {
++        const val REQUEST_SUBSCRIBE_MESSAGE = "requestSubscribeMessage"
++        const val NOTIFY_MODULE = "dsh-notify"
++        const val EVENT_SHOW_PANEL = "showSubscribePanel"
++        const val MAX_TMPL_IDS_PER_REQUEST = 5
++        const val RESULT_ACCEPT = "accept"
++        const val RESULT_REJECT = "reject"
++        const val RESULT_BAN = "ban"
++        const val RESULT_FILTER = "filter"
++        val VALID_RESULTS = setOf(RESULT_ACCEPT, RESULT_REJECT, RESULT_BAN, RESULT_FILTER)
++        const val FAIL_INVALID_TMPL_IDS = "$REQUEST_SUBSCRIBE_MESSAGE:fail invalid tmplIds"
++        const val FAIL_NOT_SUPPORTED = "$REQUEST_SUBSCRIBE_MESSAGE:fail not supported"
++        const val FAIL_INVALID_RESULT = "$REQUEST_SUBSCRIBE_MESSAGE:fail invalid host result"
++        const val FAIL_NON_TAP = "$REQUEST_SUBSCRIBE_MESSAGE:fail can only be invoked by user TAP gesture"
++    }
++
++    private val tag = "SubscribeMessageApi"
++
++    override val apiNames = setOf(REQUEST_SUBSCRIBE_MESSAGE)
++
++    override fun handleAction(
++        activity: DiminaActivity,
++        appId: String,
++        apiName: String,
++        params: JSONObject,
++        responseCallback: (String) -> Unit,
++    ): APIResult = when (apiName) {
++        REQUEST_SUBSCRIBE_MESSAGE -> requestSubscribeMessage(appId, params, responseCallback)
++        else -> super.handleAction(activity, appId, apiName, params, responseCallback)
++    }
++
++    private fun requestSubscribeMessage(
++        appId: String,
++        params: JSONObject,
++        responseCallback: (String) -> Unit,
++    ): APIResult {
++        val tmplIds = parseTmplIds(params)
++            ?: return emitFailure(FAIL_INVALID_TMPL_IDS, null, params, responseCallback)
++        if (tmplIds.isEmpty() || tmplIds.size > MAX_TMPL_IDS_PER_REQUEST) {
++            return emitFailure(FAIL_INVALID_TMPL_IDS, null, params, responseCallback)
++        }
++
++        val data = JSONObject().apply {
++            put("appId", appId)
++            put("tmplIds", JSONArray(tmplIds))
++        }
++        // 宿主可能同步或异步回调；同时 invokeExtModule 也可能报告「未注册」，
++        // 两种失败路径都只能走到一次终态回调。
++        val resolved = AtomicBoolean(false)
++        val handled = apiRegistry.invokeExtModule(
++            NOTIFY_MODULE,
++            EVENT_SHOW_PANEL,
++            data,
++            object : ExtCallback {
++                override fun onSuccess(result: JSONObject) {
++                    if (!resolved.compareAndSet(false, true)) return
++                    val payload = mapResults(tmplIds, result)
++                    if (payload == null) {
++                        LogUtils.e(tag, "showSubscribePanel returned an invalid result: $result")
++                        emitFailure(FAIL_INVALID_RESULT, null, params, responseCallback)
++                    } else {
++                        ApiUtils.invokeSuccess(params, payload, responseCallback)
++                        ApiUtils.invokeComplete(params, responseCallback, payload)
++                    }
++                }
++
++                override fun onFail(error: JSONObject) {
++                    if (!resolved.compareAndSet(false, true)) return
++                    emitFailure(normalizeFailure(error), error, params, responseCallback)
++                }
++            },
++        )
++        if (!handled && resolved.compareAndSet(false, true)) {
++            LogUtils.e(tag, "no host ext module registered for \"$NOTIFY_MODULE\"")
++            emitFailure(FAIL_NOT_SUPPORTED, null, params, responseCallback)
++        }
++        return NoneResult()
++    }
++
++    /** tmplIds 必须是 string[]；非法形状返回 null（与微信的参数错误语义一致）。 */
++    private fun parseTmplIds(params: JSONObject): List<String>? {
++        val array = params.optJSONArray("tmplIds") ?: return null
++        val ids = ArrayList<String>(array.length())
++        for (index in 0 until array.length()) {
++            val id = array.opt(index) as? String ?: return null
++            if (id.isEmpty()) return null
++            ids.add(id)
++        }
++        return ids
++    }
++
++    /**
++     * 把宿主返回的 `{results:{tplId:'accept'|'reject'}}` 映射成微信形状
++     * `{errMsg:'requestSubscribeMessage:ok', tplId:'accept'}`。
++     * 宿主漏掉的模板按 `reject` 处理（绝不把缺失的同意当成 accept）；
++     * 出现值域外的值则视为宿主契约被破坏，整次调用 fail。
++     */
++    private fun mapResults(tmplIds: List<String>, result: JSONObject): JSONObject? {
++        val results = result.optJSONObject("results") ?: return null
++        val payload = JSONObject().apply {
++            put("errMsg", "$REQUEST_SUBSCRIBE_MESSAGE:ok")
++        }
++        tmplIds.forEach { tmplId ->
++            val decision = results.opt(tmplId) as? String
++            when {
++                decision == null -> {
++                    LogUtils.w(tag, "host omitted consent for $tmplId, treat as reject")
++                    payload.put(tmplId, RESULT_REJECT)
++                }
++                decision !in VALID_RESULTS -> return null
++                else -> payload.put(tmplId, decision)
++            }
++        }
++        return payload
++    }
++
++    private fun normalizeFailure(error: JSONObject): String {
++        val raw = error.optString("errMsg")
++        if (raw.startsWith("$REQUEST_SUBSCRIBE_MESSAGE:fail")) return raw
++        if (raw.isNotEmpty()) return "$REQUEST_SUBSCRIBE_MESSAGE:fail $raw"
++        return FAIL_NON_TAP
++    }
++
++    private fun emitFailure(
++        errMsg: String,
++        source: JSONObject?,
++        params: JSONObject,
++        responseCallback: (String) -> Unit,
++    ): APIResult {
++        val result = JSONObject().apply {
++            put("errMsg", errMsg)
++            source?.opt("errCode")?.let { if (it != JSONObject.NULL) put("errCode", it) }
++        }
++        ApiUtils.invokeFail(params, result, responseCallback)
++        ApiUtils.invokeComplete(params, responseCallback, result)
++        return NoneResult()
++    }
++}
+diff --git a/android/dimina/src/main/kotlin/com/didi/dimina/core/MiniApp.kt b/android/dimina/src/main/kotlin/com/didi/dimina/core/MiniApp.kt
+index b6b2801..1d4accd 100644
+--- a/android/dimina/src/main/kotlin/com/didi/dimina/core/MiniApp.kt
++++ b/android/dimina/src/main/kotlin/com/didi/dimina/core/MiniApp.kt
+@@ -29,6 +29,7 @@ import com.didi.dimina.api.media.VideoToolApi
+ import com.didi.dimina.api.media.VideoDecoderApi
+ import com.didi.dimina.api.media.RecorderApi
+ import com.didi.dimina.api.openapi.SettingApi
++import com.didi.dimina.api.openapi.SubscribeMessageApi
+ import com.didi.dimina.api.network.LocalNetworkApi
+ import com.didi.dimina.api.route.RouteApi
+ import com.didi.dimina.api.storage.StorageApi
+@@ -394,7 +395,8 @@ class MiniApp private constructor() {
+         videoDecoderApi.registerWith(apiRegistry)
+         audioApi.registerWith(apiRegistry)
+         recorderApi.registerWith(apiRegistry)
+-        SettingApi().registerWith(apiRegistry)
++        SettingApi(apiRegistry).registerWith(apiRegistry)
++        SubscribeMessageApi(apiRegistry).registerWith(apiRegistry)
+ 
+         // route
+         RouteApi().registerWith(apiRegistry)
+diff --git a/docs/API-Reference.md b/docs/API-Reference.md
+index 146dd26..8382c87 100644
+--- a/docs/API-Reference.md
++++ b/docs/API-Reference.md
+@@ -455,6 +455,7 @@ DMPApp.init(context, { virtualFilePrefix: 'host-file://' })
+ | 开放接口 - 授权 | getSetting                     | ✓       | ✓   | ✓       | ✓   |
+ |               | openSetting                      | ✓       | ✓   | ✓       | ✗   |
+ |               | authorize                        | ✓       | ✓   | ✓       | ✓   |
++|               | requestSubscribeMessage          | ✓       | ✓   | ✗       | ✗   |
+ | 设备 - 联系人 | chooseContact                    | ✓       | ✓   | ✓       | ✗   |
+ |               | addPhoneContact                  | ✓       | ✓   | ✓       | ✗   |
+ | 设备 - 剪贴板 | setClipboardData                 | ✓       | ✓   | ✓       | ✓   |
+@@ -477,6 +478,8 @@ DMPApp.init(context, { virtualFilePrefix: 'host-file://' })
+ 补充说明：
+ 
+ - 兼容性确认按完整链路验收：service 公开入口、目标平台注册与参数/返回契约、持续事件的多监听/注销语义、权限与资源销毁、文档行以及 compiler 兼容性基线必须一起核对。service 中存在入口不代表四个平台都已完成容器实现；反过来，表中暂时缺行也不代表 native 已有实现不存在。`scanCode` 就是一次“原生三端已实现、表格漏登记”的存量审计结果。
++- `requestSubscribeMessage`（一次性模板消息订阅）只提供微信兼容的 **API 面**：service 入口 + Android / iOS 容器的参数校验与结果映射（成功形状 `{errMsg:'requestSubscribeMessage:ok', [tmplId]: 'accept'|'reject'|'ban'|'filter'}`，单次最多 5 个模板 id；非用户点击态由宿主判定，返回 `fail`）。订阅面板、订阅记账与通知投递都不在 Dimina，宿主需注册 `dsh-notify` 扩展提供 `showSubscribePanel` / `getSubscribeState`；无宿主时该 API 明确返回 `fail`，不伪造订阅结果。
++- `getSetting` 响应新增 `subscriptionsSetting`：`{mainSwitch: bool, itemSettings: {[tmplId]: 'accept'|'reject'}}`，同样是**宿主依赖**能力（由 `dsh-notify` 扩展的 `getSubscribeState` 提供），`mainSwitch` 是用户级总开关、`itemSettings` 是模板级状态；宿主未注册或查询失败时回落默认值 `{mainSwitch: true, itemSettings: {}}`，不影响 `authSetting`。读取 `subscriptionsSetting` 不需要单独的 API 名，仍走 `getSetting`。
+ - Web 的 `authorize` 当前支持浏览器可请求的相机、麦克风和定位 scope；浏览器无法打开系统应用权限页，因此 `openSetting` 明确不支持。Web 的 `chooseVideo` 返回会话期 `blob:` 临时路径；视频相册写入和编码压缩没有浏览器等价系统能力，`saveVideoToPhotosAlbum`、`compressVideo` 明确不支持。
+ - `compressVideo` 的精细编码参数受平台编码器能力约束：Android 和 HarmonyOS 会请求目标码率/分辨率，iOS 依据 `quality`/`resolution` 选择系统导出预设；编码器可能降级参数，但不会用原文件复制冒充压缩结果。
+ - `createVideoDecoder` 提供后台逐帧解码、同步 RGBA 取帧、异步控制和 `start` / `stop` / `seek` / `ended` 事件；编码格式受系统解码器限制，三端真机播放仍需验收；Web 需安全上下文、OffscreenCanvas 和 WebCodecs，并在 start 时检查 MP4 编码支持。`bufferchange` 和音轨暂不支持。接入与 libpag 的 Wasm 能力边界见[视频解码说明](./VideoDecoder.md)。
+diff --git a/fe/packages/compiler/src/common/compatibility-reference.js b/fe/packages/compiler/src/common/compatibility-reference.js
+index b4ac18d..1e6902e 100644
+--- a/fe/packages/compiler/src/common/compatibility-reference.js
++++ b/fe/packages/compiler/src/common/compatibility-reference.js
+@@ -279,6 +279,7 @@ const supportedWxApis = [
+ 	"getSetting",
+ 	"openSetting",
+ 	"authorize",
++	"requestSubscribeMessage",
+ 	"chooseContact",
+ 	"addPhoneContact",
+ 	"setClipboardData",
+diff --git a/fe/packages/service/__tests__/subscribe-message.spec.js b/fe/packages/service/__tests__/subscribe-message.spec.js
+new file mode 100644
+index 0000000..f3bba49
+--- /dev/null
++++ b/fe/packages/service/__tests__/subscribe-message.spec.js
+@@ -0,0 +1,63 @@
++/**
++ * wx.requestSubscribeMessage 的 service 层契约：
++ *   - 入口只是 API 面：把 tmplIds 原样桥给容器/原生（面板由宿主弹），
++ *     不自行判定用户点击态、不做存储/记账。
++ *   - 原生返回的微信形状 { errMsg: 'requestSubscribeMessage:ok', [tmplId]: 'accept' }
++ *     原样交给 success / Promise resolve。
++ *   - 非用户点击态（宿主返回 fail）走 fail / Promise reject，不能吞掉失败。
++ */
++import { describe, expect, it, vi } from 'vitest'
++
++async function loadSubscribeApi() {
++	vi.resetModules()
++	globalThis.DiminaServiceBridge = {
++		onMessage: null,
++		invoke: vi.fn(() => 'invoke-result'),
++		publish: vi.fn(() => 'publish-result'),
++	}
++	const [{ requestSubscribeMessage }, { callback }] = await Promise.all([
++		import('../src/api/core/open-api/subscribe-message/index.js'),
++		import('@dimina/common'),
++	])
++	return { requestSubscribeMessage, callback, bridge: globalThis.DiminaServiceBridge }
++}
++
++describe('wx.requestSubscribeMessage service adapter', () => {
++	it('bridges tmplIds to container and resolves with the wx-shaped accept payload', async () => {
++		const { requestSubscribeMessage, callback, bridge } = await loadSubscribeApi()
++		const tmplIds = ['tpl_abc123', 'tpl_def456']
++
++		const promise = requestSubscribeMessage({ tmplIds })
++
++		const message = bridge.invoke.mock.calls[0][0]
++		expect(message.body.name).toBe('requestSubscribeMessage')
++		expect(message.body.params.tmplIds).toEqual(tmplIds)
++
++		const result = {
++			errMsg: 'requestSubscribeMessage:ok',
++			tpl_abc123: 'accept',
++			tpl_def456: 'reject',
++		}
++		callback.invoke(message.body.params.success, result)
++
++		await expect(promise).resolves.toEqual(result)
++	})
++
++	it('rejects with the host failure when invoked outside a user tap gesture', async () => {
++		const { requestSubscribeMessage, callback, bridge } = await loadSubscribeApi()
++		const success = vi.fn()
++		const fail = vi.fn()
++
++		requestSubscribeMessage({ tmplIds: ['tpl_abc123'], success, fail })
++
++		const params = bridge.invoke.mock.calls[0][0].body.params
++		const error = {
++			errMsg: 'requestSubscribeMessage:fail can only be invoked by user TAP gesture',
++		}
++		callback.invoke(params.fail, error)
++
++		expect(success).not.toHaveBeenCalled()
++		expect(fail).toHaveBeenCalledTimes(1)
++		expect(fail).toHaveBeenCalledWith(error)
++	})
++})
+diff --git a/fe/packages/service/src/api/core/open-api/subscribe-message/index.js b/fe/packages/service/src/api/core/open-api/subscribe-message/index.js
+new file mode 100644
+index 0000000..e29b14a
+--- /dev/null
++++ b/fe/packages/service/src/api/core/open-api/subscribe-message/index.js
+@@ -0,0 +1,13 @@
++import { invokeAPI } from '@/api/common'
++
++/**
++ * 订阅一次性模板消息。
++ *
++ * 框架只做 API 面：参数校验与桥接由容器/原生层完成，面板由宿主弹出。
++ * 成功回调形状与微信一致：{ errMsg: 'requestSubscribeMessage:ok', [tmplId]: 'accept' }，
++ * 值域 accept / reject / ban / filter。非用户点击态或宿主不可用时走 fail。
++ * https://developers.weixin.qq.com/miniprogram/dev/api/open-api/subscribe-message/wx.requestSubscribeMessage.html
++ */
++export function requestSubscribeMessage(opts) {
++	return invokeAPI('requestSubscribeMessage', opts)
++}
+diff --git a/iOS/dimina/DiminaKit/Container/Api/DMPContainerApi.swift b/iOS/dimina/DiminaKit/Container/Api/DMPContainerApi.swift
+index c7e18e7..e804039 100644
+--- a/iOS/dimina/DiminaKit/Container/Api/DMPContainerApi.swift
++++ b/iOS/dimina/DiminaKit/Container/Api/DMPContainerApi.swift
+@@ -79,6 +79,7 @@ public class DMPContainerApi: NSObject {
+         _ = NetworkTypeAPI(app: app)
+         _ = ScreenAPI(app: app)
+         _ = SettingAPI(app: app)
++        _ = SubscribeMessageAPI(app: app)
+         _ = PhoneAPI(app: app)
+         _ = VibrateAPI(app: app)
+         _ = ScanAPI(app: app)
+diff --git a/iOS/dimina/DiminaKit/Container/Api/OpenAPI/SettingAPI.swift b/iOS/dimina/DiminaKit/Container/Api/OpenAPI/SettingAPI.swift
+index 2d95ad6..d77a50c 100644
+--- a/iOS/dimina/DiminaKit/Container/Api/OpenAPI/SettingAPI.swift
++++ b/iOS/dimina/DiminaKit/Container/Api/OpenAPI/SettingAPI.swift
+@@ -9,6 +9,8 @@ public final class SettingAPI: DMPContainerApi {
+     private static let GET_SETTING = "getSetting"
+     private static let OPEN_SETTING = "openSetting"
+     private static let AUTHORIZE = "authorize"
++    private static let NOTIFY_MODULE = "dsh-notify"
++    private static let EVENT_GET_SUBSCRIBE_STATE = "getSubscribeState"
+ 
+     private static let scopes = [
+         "scope.camera",
+@@ -20,17 +22,13 @@ public final class SettingAPI: DMPContainerApi {
+     ]
+ 
+     @BridgeMethod(GET_SETTING)
+-    var getSetting: DMPBridgeMethodHandler = { _, _, callback in
+-        DMPContainerApi.invokeSuccess(
+-            callback: callback,
+-            param: SettingAPI.settingResult(apiName: SettingAPI.GET_SETTING),
+-            completeCarriesResult: true
+-        )
++    var getSetting: DMPBridgeMethodHandler = { _, env, callback in
++        SettingAPI.emitSettingResult(apiName: SettingAPI.GET_SETTING, env: env, callback: callback)
+         return DMPAsyncResult()
+     }
+ 
+     @BridgeMethod(OPEN_SETTING)
+-    var openSetting: DMPBridgeMethodHandler = { _, _, callback in
++    var openSetting: DMPBridgeMethodHandler = { _, env, callback in
+         guard let url = URL(string: UIApplication.openSettingsURLString) else {
+             DMPContainerApi.invokeFailure(callback: callback, param: nil,
+                                           errMsg: "openSetting:fail unavailable",
+@@ -46,11 +44,7 @@ public final class SettingAPI: DMPContainerApi {
+             ) { _ in
+                 if let observer = observerBox.token { NotificationCenter.default.removeObserver(observer) }
+                 observerBox.token = nil
+-                DMPContainerApi.invokeSuccess(
+-                    callback: callback,
+-                    param: SettingAPI.settingResult(apiName: SettingAPI.OPEN_SETTING),
+-                    completeCarriesResult: true
+-                )
++                SettingAPI.emitSettingResult(apiName: SettingAPI.OPEN_SETTING, env: env, callback: callback)
+             }
+             UIApplication.shared.open(url, options: [:]) { opened in
+                 if !opened {
+@@ -111,6 +105,70 @@ public final class SettingAPI: DMPContainerApi {
+         scopes.forEach { authSetting[$0] = isGranted($0) }
+         return DMPMap(["authSetting": authSetting, "errMsg": "\(apiName):ok"])
+     }
++
++    /// `getSetting` / `openSetting` 的结果里带上 `subscriptionsSetting`（微信兼容形状）：
++    /// `{mainSwitch, itemSettings:{tplId:'accept'|'reject'}}`。状态属于宿主，框架只在
++    /// 宿主已注册 `dsh-notify` 扩展时读取；无宿主时给默认值（总开关开、无模板记录），
++    /// 保证独立运行 Dimina 时 getSetting 仍然可用。
++    private static func emitSettingResult(
++        apiName: String,
++        env: DMPBridgeEnv,
++        callback: DMPBridgeCallback?
++    ) {
++        let result = settingResult(apiName: apiName)
++        guard let app = DMPAppManager.sharedInstance().getApp(appIndex: env.appIndex),
++              let handler = app.container?.extModules[NOTIFY_MODULE] else {
++            result.set("subscriptionsSetting", defaultSubscriptionsSetting())
++            DMPContainerApi.invokeSuccess(callback: callback, param: result, completeCarriesResult: true)
++            return
++        }
++
++        // 宿主可能同步回调；不论同步/异步，终态回调只发一次。
++        let guardFlag = DMPSettingOnceGuard()
++        let extCallback = DMPExtCallback(
++            onSuccess: { state in
++                guard guardFlag.claim() else { return }
++                result.set("subscriptionsSetting", normalizeSubscriptionsSetting(state))
++                DMPContainerApi.invokeSuccess(callback: callback, param: result, completeCarriesResult: true)
++            },
++            onFail: { error in
++                guard guardFlag.claim() else { return }
++                DMPLogger.debug("getSubscribeState failed: \(error.toJsonString())")
++                result.set("subscriptionsSetting", defaultSubscriptionsSetting())
++                DMPContainerApi.invokeSuccess(callback: callback, param: result, completeCarriesResult: true)
++            }
++        )
++        // appId 用于宿主按小程序取模板级 itemSettings；总开关 mainSwitch 是用户级。
++        _ = handler(EVENT_GET_SUBSCRIBE_STATE, DMPMap(["appId": env.appId]), extCallback)
++    }
++
++    private static func defaultSubscriptionsSetting() -> [String: Any] {
++        return ["mainSwitch": true, "itemSettings": [String: String]()]
++    }
++
++    private static func normalizeSubscriptionsSetting(_ state: DMPMap) -> [String: Any] {
++        // 宿主按契约直接返回 {mainSwitch,itemSettings}；兼容包了一层 subscriptionsSetting 的实现。
++        let source = (state.get("subscriptionsSetting") as? [String: Any]) ?? state.toDictionary()
++        let mainSwitch = (source["mainSwitch"] as? Bool)
++            ?? ((source["mainSwitch"] as? NSNumber)?.boolValue)
++            ?? true
++        let itemSettings = (source["itemSettings"] as? [String: Any]) ?? [:]
++        return ["mainSwitch": mainSwitch, "itemSettings": itemSettings]
++    }
++}
++
++/// 宿主回调可能同步/异步到达，用一次性标记保证终态回调只发一次。
++private final class DMPSettingOnceGuard: @unchecked Sendable {
++    private let lock = NSLock()
++    private var resolved = false
++
++    func claim() -> Bool {
++        lock.lock()
++        defer { lock.unlock() }
++        guard !resolved else { return false }
++        resolved = true
++        return true
++    }
+ }
+ 
+ private final class DMPSettingsObserverBox: @unchecked Sendable {
+diff --git a/iOS/dimina/DiminaKit/Container/Api/OpenAPI/SubscribeMessageAPI.swift b/iOS/dimina/DiminaKit/Container/Api/OpenAPI/SubscribeMessageAPI.swift
+new file mode 100644
+index 0000000..8fc739c
+--- /dev/null
++++ b/iOS/dimina/DiminaKit/Container/Api/OpenAPI/SubscribeMessageAPI.swift
+@@ -0,0 +1,146 @@
++//
++//  SubscribeMessageAPI.swift
++//  dimina
++//
++//  一次性模板消息订阅（微信兼容 API 面）。
++//
++//  框架职责只到「参数校验 + 桥给宿主 + 把宿主结果映射回微信形状」：
++//  弹面板、记账、投递都不在这里，也不直接依赖任何宿主实现。
++//  宿主通过 `DMPAppManager.registerExtModule("dsh-notify", ...)` 注册处理器：
++//   - `showSubscribePanel(data={appId,tmplIds})` → success `{results:{tplId:'accept'|'reject'}}`
++//   - 非用户点击态 / 无宿主 → fail（微信语义）。
++//
++
++import Foundation
++
++public final class SubscribeMessageAPI: DMPContainerApi {
++    fileprivate static let REQUEST_SUBSCRIBE_MESSAGE = "requestSubscribeMessage"
++    fileprivate static let NOTIFY_MODULE = "dsh-notify"
++    fileprivate static let EVENT_SHOW_PANEL = "showSubscribePanel"
++    fileprivate static let MAX_TMPL_IDS_PER_REQUEST = 5
++    fileprivate static let validResults: Set<String> = ["accept", "reject", "ban", "filter"]
++
++    fileprivate static let FAIL_INVALID_TMPL_IDS = "requestSubscribeMessage:fail invalid tmplIds"
++    fileprivate static let FAIL_NOT_SUPPORTED = "requestSubscribeMessage:fail not supported"
++    fileprivate static let FAIL_INVALID_RESULT = "requestSubscribeMessage:fail invalid host result"
++    fileprivate static let FAIL_NON_TAP = "requestSubscribeMessage:fail can only be invoked by user TAP gesture"
++
++    @BridgeMethod(REQUEST_SUBSCRIBE_MESSAGE)
++    var requestSubscribeMessage: DMPBridgeMethodHandler = { param, env, callback in
++        guard let tmplIds = SubscribeMessageAPI.parseTmplIds(param.getMap()),
++              !tmplIds.isEmpty,
++              tmplIds.count <= SubscribeMessageAPI.MAX_TMPL_IDS_PER_REQUEST else {
++            DMPContainerApi.invokeFailure(
++                callback: callback,
++                param: DMPMap(["errMsg": SubscribeMessageAPI.FAIL_INVALID_TMPL_IDS]),
++                errMsg: SubscribeMessageAPI.FAIL_INVALID_TMPL_IDS,
++                completeCarriesResult: true
++            )
++            return DMPAsyncResult()
++        }
++
++        guard let app = DMPAppManager.sharedInstance().getApp(appIndex: env.appIndex),
++              let handler = app.container?.extModules[SubscribeMessageAPI.NOTIFY_MODULE] else {
++            DMPContainerApi.invokeFailure(
++                callback: callback,
++                param: DMPMap(["errMsg": SubscribeMessageAPI.FAIL_NOT_SUPPORTED]),
++                errMsg: SubscribeMessageAPI.FAIL_NOT_SUPPORTED,
++                completeCarriesResult: true
++            )
++            return DMPAsyncResult()
++        }
++
++        // 宿主可能同步或异步回调；保证终态只回一次。
++        let guardFlag = DMPSubscribeOnceGuard()
++        let data = DMPMap(["appId": env.appId, "tmplIds": tmplIds])
++        let extCallback = DMPExtCallback(
++            onSuccess: { result in
++                guard guardFlag.claim() else { return }
++                guard let payload = SubscribeMessageAPI.mapResults(tmplIds: tmplIds, result: result) else {
++                    DMPLogger.debug("showSubscribePanel returned an invalid result: \(result.toJsonString())")
++                    SubscribeMessageAPI.emitFailure(
++                        errMsg: SubscribeMessageAPI.FAIL_INVALID_RESULT,
++                        source: nil,
++                        callback: callback
++                    )
++                    return
++                }
++                DMPContainerApi.invokeSuccess(callback: callback, param: payload, completeCarriesResult: true)
++            },
++            onFail: { error in
++                guard guardFlag.claim() else { return }
++                SubscribeMessageAPI.emitFailure(
++                    errMsg: SubscribeMessageAPI.normalizeFailure(error),
++                    source: error,
++                    callback: callback
++                )
++            }
++        )
++        _ = handler(SubscribeMessageAPI.EVENT_SHOW_PANEL, data, extCallback)
++        return DMPAsyncResult()
++    }
++
++    /// tmplIds 必须是 string[]；非法形状返回 nil（与微信的参数错误语义一致）。
++    fileprivate static func parseTmplIds(_ map: DMPMap) -> [String]? {
++        guard let raw = map.get("tmplIds") as? [Any] else { return nil }
++        var tmplIds: [String] = []
++        for item in raw {
++            guard let id = item as? String, !id.isEmpty else { return nil }
++            tmplIds.append(id)
++        }
++        return tmplIds
++    }
++
++    /// 把宿主返回的 `{results:{tplId:'accept'|'reject'}}` 映射成微信形状
++    /// `{errMsg:'requestSubscribeMessage:ok', tplId:'accept'}`。
++    /// 宿主漏掉的模板按 `reject` 处理（绝不把缺失的同意当成 accept）；
++    /// 出现值域外的值则视为宿主契约被破坏，整次调用 fail。
++    fileprivate static func mapResults(tmplIds: [String], result: DMPMap) -> DMPMap? {
++        guard let results = result.get("results") as? [String: Any] else { return nil }
++        let payload = DMPMap(["errMsg": "\(REQUEST_SUBSCRIBE_MESSAGE):ok"])
++        for tmplId in tmplIds {
++            guard let decision = results[tmplId] as? String else {
++                DMPLogger.debug("host omitted consent for \(tmplId), treat as reject")
++                payload.set(tmplId, "reject")
++                continue
++            }
++            guard validResults.contains(decision) else { return nil }
++            payload.set(tmplId, decision)
++        }
++        return payload
++    }
++
++    fileprivate static func normalizeFailure(_ error: DMPMap) -> String {
++        let raw = error.getString(key: "errMsg") ?? ""
++        if raw.hasPrefix("\(REQUEST_SUBSCRIBE_MESSAGE):fail") { return raw }
++        if !raw.isEmpty { return "\(REQUEST_SUBSCRIBE_MESSAGE):fail \(raw)" }
++        return FAIL_NON_TAP
++    }
++
++    fileprivate static func emitFailure(errMsg: String, source: DMPMap?, callback: DMPBridgeCallback?) {
++        let result = DMPMap(["errMsg": errMsg])
++        if let errCode = source?.get("errCode") {
++            result.set("errCode", errCode)
++        }
++        DMPContainerApi.invokeFailure(
++            callback: callback,
++            param: result,
++            errMsg: errMsg,
++            completeCarriesResult: true
++        )
++    }
++}
++
++/// 宿主回调可能同步/异步到达，用一次性标记保证终态回调只发一次。
++private final class DMPSubscribeOnceGuard: @unchecked Sendable {
++    private let lock = NSLock()
++    private var resolved = false
++
++    func claim() -> Bool {
++        lock.lock()
++        defer { lock.unlock() }
++        guard !resolved else { return false }
++        resolved = true
++        return true
++    }
++}

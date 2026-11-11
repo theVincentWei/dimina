@@ -1,0 +1,12 @@
+diff --git a/fe/packages/compiler/src/common/compatibility-reference.js b/fe/packages/compiler/src/common/compatibility-reference.js
+index b4ac18d..1e6902e 100644
+--- a/fe/packages/compiler/src/common/compatibility-reference.js
++++ b/fe/packages/compiler/src/common/compatibility-reference.js
+@@ -279,6 +279,7 @@ const supportedWxApis = [
+ 	"getSetting",
+ 	"openSetting",
+ 	"authorize",
++	"requestSubscribeMessage",
+ 	"chooseContact",
+ 	"addPhoneContact",
+ 	"setClipboardData",

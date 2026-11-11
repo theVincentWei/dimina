@@ -1,0 +1,85 @@
+From 9fc9649939182215b84ab6e3f1c050d08d130941 Mon Sep 17 00:00:00 2001
+From: Wei Mingchen <weimingchen1997@qq.com>
+Date: Wed, 11 Nov 2026 01:26:48 +0800
+Subject: [PATCH 22/25] =?UTF-8?q?fix(container):=20service=20invoke=20?=
+ =?UTF-8?q?=E8=A2=AB=E9=9D=99=E9=BB=98=E4=B8=A2=E5=BC=83=E2=80=94=E2=80=94?=
+ =?UTF-8?q?redirectTo=20=E5=90=8E=E6=89=80=E6=9C=89=20wx.*=20API=20?=
+ =?UTF-8?q?=E5=A4=B1=E6=95=88=E7=9A=84=E7=AC=AC=E4=BA=8C=E6=AE=B5=E6=A0=B9?=
+ =?UTF-8?q?=E5=9B=A0?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+updatePath 重建桥后，fe service 路由器顶部页 id（getPageInfo().id，redirectTo
+换桥后与桥 id 不同源）与原生 invokeCallbacks 的桥注册键不匹配，service→container
+的 invokeAPI 在 invokeFromJS 分发处返回 null 全部静默丢弃——结果页按钮/跳转全失效
+（真机实证：双拼教练 onRetry/onStats 收到事件但 wx.redirectTo/switchTab 无响应）。
+
+两层修复：
+- engine_qjs invokeFromJS：id 无回调时回落到最近注册的桥（service 栈顶页面必然
+  挂在最新桥上），附 W 级诊断日志；
+- Bridge messageInvoke：service→container 信任接收桥（service 为单例上下文且
+  下游 transMsg 一律以本桥 id 重新键控）；render→container 保留校验。
+
+验证：214 仿真器（arm64 debug, build 11110122）双拼教练结果页「再来一组」
+redirect 到新练习、「查看统计」switchTab 到统计页均恢复。遗留：fe 路由器
+remove(pageId) 传参为 bridgeId（runtime.js:708）与页 id 同源后此 workaround
+可移除，另 follow-up。
+---
+ .../main/kotlin/com/didi/dimina/core/Bridge.kt    |  9 ++++++++-
+ .../com/didi/dimina/engine/qjs/QuickJSEngine.kt   | 15 ++++++++++++++-
+ 2 files changed, 22 insertions(+), 2 deletions(-)
+
+diff --git a/android/dimina/src/main/kotlin/com/didi/dimina/core/Bridge.kt b/android/dimina/src/main/kotlin/com/didi/dimina/core/Bridge.kt
+index 6277992..ae9f904 100644
+--- a/android/dimina/src/main/kotlin/com/didi/dimina/core/Bridge.kt
++++ b/android/dimina/src/main/kotlin/com/didi/dimina/core/Bridge.kt
+@@ -224,11 +224,18 @@ class Bridge(
+         val body = msg.getJSONObject("body")
+         val bridgeId = body.optString("bridgeId")
+ 
+-        if (bridgeId.isNotEmpty() && bridgeId != id) {
++        // render→container 保留 bridgeId 校验（渲染层可能残留旧桥消息）。
++        // service→container 不校验：service 是单例上下文，为当前栈顶页面服务，其
++        // API 消息携带的 id 来自 fe service 路由器（redirectTo 换桥后与桥 id 不同源，
++        // 真机实证 2026-11-11：双拼教练结果页所有 API invoke 被此处静默丢弃导致
++        // 按钮/跳转全失效），且下游 transMsg 一律以本桥 id 重新键控，放行安全。
++        if (source != "service" && bridgeId.isNotEmpty() && bridgeId != id) {
++            LogUtils.d(tag, "[Container] DROP msg from $source (bridgeId mismatch): msg=$bridgeId mine=$id type=${msg.optString("type")}")
+             return JSValue.createUndefined()
+         }
+         val incomingResourceLoadId = body.optString("resourceLoadId")
+         if (incomingResourceLoadId.isNotEmpty() && incomingResourceLoadId != resourceLoadId) {
++            LogUtils.d(tag, "[Container] DROP msg from $source (resourceLoadId mismatch): msg=$incomingResourceLoadId mine=$resourceLoadId type=${msg.optString("type")}")
+             return JSValue.createUndefined()
+         }
+ 
+diff --git a/android/engine_qjs/src/main/kotlin/com/didi/dimina/engine/qjs/QuickJSEngine.kt b/android/engine_qjs/src/main/kotlin/com/didi/dimina/engine/qjs/QuickJSEngine.kt
+index bbf9173..85b3b59 100644
+--- a/android/engine_qjs/src/main/kotlin/com/didi/dimina/engine/qjs/QuickJSEngine.kt
++++ b/android/engine_qjs/src/main/kotlin/com/didi/dimina/engine/qjs/QuickJSEngine.kt
+@@ -441,7 +441,20 @@ class QuickJSEngine {
+         if (msg.optString("type") != "canvasNodeSync") Log.d(tag, "Received invoke from JavaScript: ${msg.optString("type")}")
+         val body = msg.getJSONObject("body")
+         val id = body.optString("bridgeId")
+-        return invokeCallbacks[id]?.invoke(msg)
++        val handler = invokeCallbacks[id]
++        if (handler == null) {
++            // 兜底分发：service 侧 invoke 携带的 id 与桥注册键不一致时（redirectTo 换桥
++            // 后 service 路由器顶部页 id 未跟上新桥），回落到最近注册的桥——service
++            // 当前栈顶页面必然挂在最新的桥上。真机实证：双拼教练结果页 redirectTo/
++            // switchTab invoke 全部被静默丢弃（2026-11-11）。
++            val fallback = invokeCallbacks.entries.lastOrNull()?.value
++            if (fallback != null && msg.optString("type") == "invokeAPI") {
++                Log.w(tag, "invokeFromJS: no handler for id=$id, fallback to latest bridge (registered=${invokeCallbacks.keys})")
++                return fallback.invoke(msg)
++            }
++            Log.w(tag, "invokeFromJS: NO invoke handler for id=$id (registered=${invokeCallbacks.keys})")
++        }
++        return handler?.invoke(msg)
+     }
+ 
+     @Suppress("unused")
+-- 
+2.50.1 (Apple Git-155)
+

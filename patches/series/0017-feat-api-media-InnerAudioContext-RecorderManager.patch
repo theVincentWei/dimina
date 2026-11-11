@@ -1,0 +1,1666 @@
+From 8f1541678d8811e460d37ba75bf86e205445c1c2 Mon Sep 17 00:00:00 2001
+From: Wei Mingchen <weimingchen1997@qq.com>
+Date: Tue, 10 Nov 2026 19:56:10 +0800
+Subject: [PATCH 17/25] =?UTF-8?q?feat(api/media):=20=E6=96=B0=E5=A2=9E?=
+ =?UTF-8?q?=E9=9F=B3=E9=A2=91=E6=8E=A5=E5=8F=A3=E5=8E=9F=E7=94=9F=E5=AE=9E?=
+ =?UTF-8?q?=E7=8E=B0=20InnerAudioContext=20+=20RecorderManager?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- AudioApi:InnerAudio.* 十个 wire 名;MediaPlayer 实例池(键 appId to instanceId),
+  网络源流式 prepareAsync,autoplay/startTime/pending-play 状态机,错误态/stop 后
+  play 自动重 prepare;getState 走 SyncResult(JSValue.createNative) 同步返回秒级
+  {duration, currentTime, paused};事件照 NetworkApi Listener 范式推送,onTimeUpdate
+  主线程 Handler 200ms 节流;errCode 映射 10001 系统/10002 网络/10003 文件/
+  10004 格式不支持/10005 解码;destroy 全释放;播放申请/暂停释放音频焦点,
+  焦点丢失自动暂停并推 pause 事件
+- RecorderApi:单例 per appId;aac=MediaRecorder(AAC_ADTS/AAC 含 maxDuration 自动停),
+  wav=AudioRecord 直写 PCM 流式 WAV 头(pause 期间丢弃不计时);RECORD_AUDIO 运行时
+  权限,拒绝→fail 'Recorder.start:fail auth deny';stop 成功返回
+  {tempFilePath, duration, fileSize},tempFilePath 复用 PathUtils.appTempRoot
+  临时目录机制;焦点丢失发 interruptionBegin/End 并自动暂停/续录
+- MiniApp:注册 audioApi/recorderApi,clearApp/clearAll/destroy 挂接清理
+- 单测:InnerAudioRules(errCode 映射/事件归一/参数收敛)、RecorderRules(格式/
+  采样率/声道/码率校验、状态机、wire 名映射)、ElapsedTimer、WavHeader 共 25 例
+
+构建自检::dimina:compileDebugKotlin + testDebugUnitTest 全过(25 新增用例,存量无回归)
+---
+ .../com/didi/dimina/api/media/AudioApi.kt     | 574 ++++++++++++++
+ .../com/didi/dimina/api/media/RecorderApi.kt  | 710 ++++++++++++++++++
+ .../kotlin/com/didi/dimina/core/MiniApp.kt    |  12 +
+ .../dimina/api/media/InnerAudioRulesTest.kt   |  85 +++
+ .../dimina/api/media/RecorderRulesTest.kt     | 169 +++++
+ 5 files changed, 1550 insertions(+)
+ create mode 100644 android/dimina/src/main/kotlin/com/didi/dimina/api/media/AudioApi.kt
+ create mode 100644 android/dimina/src/main/kotlin/com/didi/dimina/api/media/RecorderApi.kt
+ create mode 100644 android/dimina/src/test/java/com/didi/dimina/api/media/InnerAudioRulesTest.kt
+ create mode 100644 android/dimina/src/test/java/com/didi/dimina/api/media/RecorderRulesTest.kt
+
+diff --git a/android/dimina/src/main/kotlin/com/didi/dimina/api/media/AudioApi.kt b/android/dimina/src/main/kotlin/com/didi/dimina/api/media/AudioApi.kt
+new file mode 100644
+index 0000000..ca20f8a
+--- /dev/null
++++ b/android/dimina/src/main/kotlin/com/didi/dimina/api/media/AudioApi.kt
+@@ -0,0 +1,574 @@
++package com.didi.dimina.api.media
++
++import android.content.Context
++import android.media.AudioAttributes
++import android.media.AudioFocusRequest
++import android.media.AudioManager
++import android.media.MediaPlayer
++import android.media.PlaybackParams
++import android.os.Handler
++import android.os.Looper
++import com.didi.dimina.api.APIResult
++import com.didi.dimina.api.AsyncResult
++import com.didi.dimina.api.BaseApiHandler
++import com.didi.dimina.api.SyncResult
++import com.didi.dimina.common.ApiUtils
++import com.didi.dimina.common.PathUtils
++import com.didi.dimina.engine.qjs.JSValue
++import com.didi.dimina.ui.container.DiminaActivity
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.SupervisorJob
++import kotlinx.coroutines.launch
++import org.json.JSONObject
++import java.util.concurrent.ConcurrentHashMap
++import kotlin.math.abs
++
++/**
++ * 微信 errCode 约定（契约 v1）：10001 系统 / 10002 网络 / 10003 文件 / 10004 格式不支持 / 10005 解码。
++ */
++internal object InnerAudioRules {
++    const val ERR_SYSTEM = 10001
++    const val ERR_NETWORK = 10002
++    const val ERR_FILE = 10003
++    const val ERR_FORMAT = 10004
++    const val ERR_DECODE = 10005
++
++    /** 事件名既可能带 on 前缀（微信监听器名）也可能不带；归一成 camelCase 规范名。 */
++    val CANONICAL_EVENTS = setOf(
++        "canplay", "play", "pause", "stop", "ended", "timeUpdate", "error",
++        "waiting", "seeking", "seeked", "loadedmetadata",
++    )
++
++    /** 未知事件返回 null，由调用方决定 fail errMsg。on 前缀大小写不敏感容错。 */
++    fun normalizeEvent(event: String): String? {
++        val trimmed = event.trim()
++        val stripped = if (trimmed.length > 2 && trimmed.startsWith("on", ignoreCase = true)) {
++            trimmed.substring(2)
++        } else {
++            trimmed
++        }
++        if (stripped.isEmpty()) return null
++        val canonical = stripped.replaceFirstChar { it.lowercase() }
++        return if (canonical in CANONICAL_EVENTS) canonical else null
++    }
++
++    /** MediaPlayer OnErrorListener 的 (what, extra) → 微信 errCode。 */
++    fun mapPlayerError(what: Int, extra: Int): Int = when {
++        extra == MediaPlayer.MEDIA_ERROR_UNSUPPORTED -> ERR_FORMAT
++        extra == MediaPlayer.MEDIA_ERROR_MALFORMED -> ERR_DECODE
++        extra == MediaPlayer.MEDIA_ERROR_IO || extra == MediaPlayer.MEDIA_ERROR_TIMED_OUT -> ERR_NETWORK
++        what == MediaPlayer.MEDIA_ERROR_SERVER_DIED -> ERR_SYSTEM
++        else -> ERR_SYSTEM
++    }
++
++    /** setDataSource / 本地路径解析阶段的失败 → 微信 errCode（路径类错误优先归 10003 文件）。 */
++    fun mapDataSourceFailure(error: Throwable): Int = when (error) {
++        is java.io.IOException, is IllegalArgumentException, is IllegalStateException -> ERR_FILE
++        else -> ERR_SYSTEM
++    }
++
++    /** volume 允许 0~1，越界收敛到边界；非法值回落默认 1。 */
++    fun clampVolume(volume: Double): Double = when {
++        volume.isNaN() || volume.isInfinite() -> 1.0
++        else -> volume.coerceIn(0.0, 1.0)
++    }
++
++    /** playbackRate 范围 0.5~2.0（微信语义），越界收敛；非法值回落默认 1.0。 */
++    fun clampPlaybackRate(rate: Double): Double = when {
++        rate.isNaN() || rate.isInfinite() -> 1.0
++        else -> rate.coerceIn(0.5, 2.0)
++    }
++}
++
++/**
++ * Media - InnerAudioContext 原生实现（契约 v1）。
++ *
++ * 实例表键 = `appId to instanceId`（镜像 VideoDecoderApi 的 sessions）；
++ * `InnerAudio.getState` 走 SyncResult(JSValue.createNative) 同步返回；
++ * 事件推送走 NetworkApi 的 Listener(callbackId, responseCallback) + createCallbackResponse 范式；
++ * onTimeUpdate 由主线程 Handler 每 200ms 节流推送。
++ */
++class AudioApi : BaseApiHandler() {
++    private companion object {
++        const val TIME_UPDATE_INTERVAL_MS = 200L
++    }
++
++    private class Listener(
++        val callbackId: String,
++        val responseCallback: (String) -> Unit,
++    )
++
++    /** 单个 InnerAudioContext 实例：一个 MediaPlayer + 一张事件表 + 一个节流 ticker。 */
++    private inner class InnerAudioInstance(
++        val appId: String,
++        val instanceId: String,
++        val audioManager: AudioManager,
++    ) {
++        val listeners = ConcurrentHashMap<String, MutableMap<String, Listener>>()
++        val mainHandler = Handler(Looper.getMainLooper())
++        var player: MediaPlayer? = null
++        var src = ""
++        var autoplay = false
++        var loop = false
++        var volume = 1.0
++        var playbackRate = 1.0
++        var startTime = 0.0
++        /** Android 无硬件静音开关，obeyMuteSwitch 仅透传保存（契约注释说明）。 */
++        var obeyMuteSwitch = true
++        var pendingPlay = false
++        var pendingSeekMs = -1
++        /** onPrepared 里的 startTime/pendingSeek 自动落位不给 JS 发 seeked（微信语义）。 */
++        var suppressNextSeeked = false
++        var prepared = false
++        var stopped = false
++        /** 播放器进入 error 态后必须 reset+re-prepare 才能再播。 */
++        var errored = false
++        var destroyed = false
++        /** 下一次 prepare 链的代际号；setSrc/destroy 使旧链作废。 */
++        var prepareGeneration = 0L
++        var lastOp = "setSrc"
++        var audioFocusRequest: AudioFocusRequest? = null
++
++        // getState 可能从 JS 线程同步读取，单独 volatile。
++        @Volatile var paused = true
++        @Volatile var cachedDuration = 0.0
++        @Volatile var cachedCurrentTime = 0.0
++
++        val ticker = object : Runnable {
++            override fun run() {
++                if (destroyed || paused || !prepared) return
++                val current = player ?: return
++                val position = runCatching { current.currentPosition }.getOrNull() ?: return
++                cachedCurrentTime = position / 1000.0
++                emit("timeUpdate", JSONObject()
++                    .put("currentTime", cachedCurrentTime)
++                    .put("duration", cachedDuration))
++                mainHandler.postDelayed(this, TIME_UPDATE_INTERVAL_MS)
++            }
++        }
++
++        fun snapshot(): JSONObject = JSONObject()
++            .put("duration", cachedDuration)
++            .put("currentTime", cachedCurrentTime)
++            .put("paused", paused)
++    }
++
++    private val sessions = ConcurrentHashMap<Pair<String, String>, InnerAudioInstance>()
++    private val mainHandler = Handler(Looper.getMainLooper())
++
++    override val apiNames = setOf(
++        "InnerAudio.setSrc", "InnerAudio.play", "InnerAudio.pause", "InnerAudio.stop",
++        "InnerAudio.seek", "InnerAudio.setProperty", "InnerAudio.getState",
++        "InnerAudio.on", "InnerAudio.off", "InnerAudio.destroy",
++    )
++
++    fun clearApp(appId: String) {
++        sessions.keys.filter { it.first == appId }.forEach { sessions.remove(it)?.destroy() }
++    }
++
++    fun clearAll() {
++        sessions.keys.toList().forEach { sessions.remove(it)?.destroy() }
++    }
++
++    override fun handleAction(
++        activity: DiminaActivity,
++        appId: String,
++        apiName: String,
++        params: JSONObject,
++        responseCallback: (String) -> Unit,
++    ): APIResult {
++        val instanceId = params.optString("instanceId")
++        if (instanceId.isEmpty()) {
++            return asyncFail(apiName, "missing instanceId")
++        }
++        val key = appId to instanceId
++        return when (apiName) {
++            "InnerAudio.getState" -> {
++                val state = sessions[key]?.snapshot()
++                    ?: JSONObject().put("duration", 0.0).put("currentTime", 0.0).put("paused", true)
++                SyncResult(JSValue.createNative(state))
++            }
++            "InnerAudio.setSrc" -> {
++                val src = params.optString("src")
++                if (src.isEmpty()) return asyncFail(apiName, "invalid src")
++                val instance = sessions.getOrPut(key) {
++                    InnerAudioInstance(appId, instanceId, audioManagerOf(activity))
++                }
++                mainHandler.post { instance.setSrc(activity, src) }
++                asyncOk(apiName)
++            }
++            "InnerAudio.play" -> {
++                val instance = sessions[key] ?: return missingInstance(apiName)
++                mainHandler.post { instance.play() }
++                asyncOk(apiName)
++            }
++            "InnerAudio.pause" -> {
++                val instance = sessions[key] ?: return missingInstance(apiName)
++                mainHandler.post { instance.pause() }
++                asyncOk(apiName)
++            }
++            "InnerAudio.stop" -> {
++                val instance = sessions[key] ?: return missingInstance(apiName)
++                mainHandler.post { instance.stop() }
++                asyncOk(apiName)
++            }
++            "InnerAudio.seek" -> {
++                val instance = sessions[key] ?: return missingInstance(apiName)
++                val position = params.optDouble("position", Double.NaN)
++                if (position.isNaN() || position < 0) return asyncFail(apiName, "invalid position")
++                mainHandler.post { instance.seek(position) }
++                asyncOk(apiName)
++            }
++            "InnerAudio.setProperty" -> {
++                val instance = sessions[key] ?: return missingInstance(apiName)
++                mainHandler.post { instance.setProperty(params) }
++                asyncOk(apiName)
++            }
++            "InnerAudio.on" -> {
++                val instance = sessions[key] ?: return missingInstance(apiName)
++                val event = InnerAudioRules.normalizeEvent(params.optString("event"))
++                    ?: return asyncFail(apiName, "unsupported event ${params.optString("event")}")
++                val callbackId = params.optString("success")
++                if (callbackId.isEmpty()) return asyncFail(apiName, "invalid callback")
++                instance.listeners.getOrPut(event) { ConcurrentHashMap() }[callbackId] =
++                    Listener(callbackId, responseCallback)
++                asyncOk(apiName)
++            }
++            "InnerAudio.off" -> {
++                val instance = sessions[key] ?: return missingInstance(apiName)
++                val event = InnerAudioRules.normalizeEvent(params.optString("event"))
++                    ?: return asyncFail(apiName, "unsupported event ${params.optString("event")}")
++                val callbackId = params.optString("success")
++                instance.listeners[event]?.let { listeners ->
++                    if (callbackId.isEmpty()) listeners.clear() else listeners.remove(callbackId)
++                }
++                asyncOk(apiName)
++            }
++            "InnerAudio.destroy" -> {
++                sessions.remove(key)?.destroy()
++                asyncOk(apiName)
++            }
++            else -> super.handleAction(activity, appId, apiName, params, responseCallback)
++        }
++    }
++
++    private fun audioManagerOf(activity: DiminaActivity): AudioManager =
++        activity.getSystemService(Context.AUDIO_SERVICE) as AudioManager
++
++    /** 未注册实例的操作（setSrc 之前 play、destroy 之后调用等）：对齐 VideoDecoderApi 的 fail 语义。 */
++    private fun missingInstance(apiName: String): APIResult = asyncFail(apiName, "instance not found")
++
++    /** AsyncResult + `:ok` errMsg：框架会自动派发 success 与 complete。 */
++    private fun asyncOk(apiName: String): APIResult =
++        AsyncResult(JSONObject().put("errMsg", "$apiName:ok"))
++
++    /** AsyncResult + 非 `:ok` errMsg：框架会自动派发 fail 与 complete。 */
++    private fun asyncFail(apiName: String, detail: String): APIResult =
++        AsyncResult(JSONObject().put("errMsg", "$apiName:fail $detail"))
++
++    /** 事件投递一律收敛回主线程，与 MediaPlayer 回调顺序一致。 */
++    private fun InnerAudioInstance.emit(event: String, payload: JSONObject) {
++        mainHandler.post {
++            if (destroyed) return@post
++            listeners[event]?.values?.toList()?.forEach { listener ->
++                listener.responseCallback(ApiUtils.createCallbackResponse(listener.callbackId, payload))
++            }
++        }
++    }
++
++    private fun InnerAudioInstance.emitError(detail: String, errCode: Int) {
++        emit("error", JSONObject()
++            .put("errCode", errCode)
++            .put("errMsg", "InnerAudio.$lastOp:fail $detail"))
++    }
++
++    private fun InnerAudioInstance.requestFocus() {
++        if (audioFocusRequest != null) return
++        val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
++            .setAudioAttributes(
++                AudioAttributes.Builder()
++                    .setUsage(AudioAttributes.USAGE_MEDIA)
++                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
++                    .build()
++            )
++            .setOnAudioFocusChangeListener { change ->
++                mainHandler.post {
++                    if (change != AudioManager.AUDIOFOCUS_GAIN) pauseByFocusLoss()
++                }
++            }
++            .build()
++        audioFocusRequest = request
++        runCatching { audioManager.requestAudioFocus(request) }
++    }
++
++    private fun InnerAudioInstance.abandonFocus() {
++        val request = audioFocusRequest ?: return
++        audioFocusRequest = null
++        runCatching { audioManager.abandonAudioFocusRequest(request) }
++    }
++
++    /** 焦点丢失：暂停并推送 pause 事件（契约「焦点丢失 → 发 pause 事件」），不自动恢复。 */
++    private fun InnerAudioInstance.pauseByFocusLoss() {
++        if (destroyed || paused || !prepared) return
++        player?.let { runCatching { it.pause() } }
++        paused = true
++        mainHandler.removeCallbacks(ticker)
++        emit("pause", JSONObject())
++    }
++
++    private fun InnerAudioInstance.setSrc(activity: DiminaActivity, nextSrc: String) {
++        if (destroyed) return
++        src = nextSrc
++        lastOp = "setSrc"
++        pendingPlay = false
++        pendingSeekMs = -1
++        prepared = false
++        stopped = false
++        errored = false
++        paused = true
++        cachedDuration = 0.0
++        cachedCurrentTime = 0.0
++        mainHandler.removeCallbacks(ticker)
++        prepareAsync(activity)
++    }
++
++    /**
++     * 解析源并 prepare。本地 difile/包内路径走 PathUtils 解析；网络 http(s) 源直接交给
++     * MediaPlayer 流式 prepareAsync（setDataSource 的网络 IO 放 IO 线程，回调仍回主线程）。
++     */
++    private fun InnerAudioInstance.prepareAsync(activity: DiminaActivity) {
++        val generation = ++prepareGeneration
++        player?.let { runCatching { it.reset() } }
++        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
++            val resolved = runCatching {
++                if (src.startsWith("http://") || src.startsWith("https://")) src
++                else PathUtils.pathToAppResource(activity, src, appId)
++            }
++            mainHandler.post {
++                if (destroyed || generation != prepareGeneration) return@post
++                val target = player ?: MediaPlayer().also { player = it }
++                resolved.fold(
++                    { source -> attachAndPrepare(target, source) },
++                    { failure ->
++                        paused = true
++                        emitError(
++                            failure.message ?: "resolve src failed",
++                            InnerAudioRules.mapDataSourceFailure(failure),
++                        )
++                    },
++                )
++            }
++        }
++    }
++
++    /** play-after-stop 的重 prepare：src 不变，直接走最后一次解析结果（无网络 IO）。 */
++    private fun InnerAudioInstance.reprepare() {
++        val generation = ++prepareGeneration
++        val source = src
++        mainHandler.post {
++            if (destroyed || generation != prepareGeneration) return@post
++            val target = player ?: return@post
++            attachAndPrepare(target, source)
++        }
++    }
++
++    private fun InnerAudioInstance.attachAndPrepare(target: MediaPlayer, source: String) {
++        if (destroyed) return
++        try {
++            target.reset()
++            target.setDataSource(source)
++            target.setOnPreparedListener { preparedTarget -> onPrepared(preparedTarget) }
++            target.setOnCompletionListener {
++                paused = true
++                cachedCurrentTime = cachedDuration
++                mainHandler.removeCallbacks(ticker)
++                emit("ended", JSONObject())
++            }
++            target.setOnErrorListener { _, what, extra -> onPlayerError(what, extra) }
++            target.setOnSeekCompleteListener {
++                if (destroyed) return@setOnSeekCompleteListener
++                if (suppressNextSeeked) {
++                    suppressNextSeeked = false
++                } else {
++                    emit("seeked", JSONObject())
++                }
++            }
++            prepared = false
++            target.prepareAsync()
++        } catch (failure: Throwable) {
++            paused = true
++            emitError(failure.message ?: "invalid src", InnerAudioRules.mapDataSourceFailure(failure))
++        }
++    }
++
++    private fun InnerAudioInstance.onPlayerError(what: Int, extra: Int): Boolean {
++        if (destroyed) return true
++        paused = true
++        prepared = false
++        errored = true
++        mainHandler.removeCallbacks(ticker)
++        emitError("player error (what=$what, extra=$extra)", InnerAudioRules.mapPlayerError(what, extra))
++        return true
++    }
++
++    private fun InnerAudioInstance.onPrepared(target: MediaPlayer) {
++        if (destroyed) return
++        prepared = true
++        cachedDuration = runCatching { target.duration / 1000.0 }.getOrDefault(0.0)
++        cachedCurrentTime = 0.0
++        applyPlaybackRate(target)
++        val seekToMs = if (pendingSeekMs >= 0) pendingSeekMs.toLong() else (startTime * 1000).toLong()
++        if (seekToMs > 0) {
++            suppressNextSeeked = true
++            runCatching { target.seekTo(seekToMs, MediaPlayer.SEEK_PREVIOUS_SYNC) }
++            pendingSeekMs = -1
++        }
++        emit("canplay", JSONObject())
++        emit("loadedmetadata", JSONObject())
++        if (autoplay || pendingPlay) {
++            pendingPlay = false
++            startInternal(target)
++        }
++    }
++
++    private fun InnerAudioInstance.applyPlaybackRate(target: MediaPlayer) {
++        if (abs(playbackRate - 1.0) < 1e-6) return
++        runCatching {
++            target.playbackParams = PlaybackParams().setSpeed(playbackRate.toFloat())
++        }
++    }
++
++    private fun InnerAudioInstance.startInternal(target: MediaPlayer) {
++        requestFocus()
++        try {
++            applyPlaybackRate(target)
++            target.start()
++            paused = false
++            stopped = false
++            emit("play", JSONObject())
++            mainHandler.removeCallbacks(ticker)
++            mainHandler.postDelayed(ticker, TIME_UPDATE_INTERVAL_MS)
++        } catch (failure: Throwable) {
++            emitError(failure.message ?: "start failed", InnerAudioRules.mapDataSourceFailure(failure))
++        }
++    }
++
++    private fun InnerAudioInstance.play() {
++        if (destroyed) return
++        lastOp = "play"
++        if (src.isEmpty()) {
++            emitError("no valid audio source", InnerAudioRules.ERR_FILE)
++            return
++        }
++        val target = player
++        when {
++            target == null ->
++                // setSrc 的解析链尚未落 player：记 pending-play，onPrepared 时自动起播。
++                waitUntilPrepared()
++            prepared -> startInternal(target)
++            stopped || errored -> {
++                // stop()/错误态之后 MediaPlayer 必须重新 prepare 才能播。
++                pendingPlay = true
++                errored = false
++                stopped = false
++                reprepare()
++            }
++            else -> waitUntilPrepared()
++        }
++    }
++
++    private fun InnerAudioInstance.waitUntilPrepared() {
++        pendingPlay = true
++        emit("waiting", JSONObject())
++    }
++
++    private fun InnerAudioInstance.pause() {
++        if (destroyed) return
++        lastOp = "pause"
++        pendingPlay = false
++        val target = player ?: return
++        if (!prepared || paused) return
++        runCatching { target.pause() }
++        paused = true
++        mainHandler.removeCallbacks(ticker)
++        emit("pause", JSONObject())
++        abandonFocus()
++    }
++
++    private fun InnerAudioInstance.stop() {
++        if (destroyed) return
++        lastOp = "stop"
++        pendingPlay = false
++        val target = player ?: return
++        if (stopped) return
++        if (prepared) {
++            try {
++                target.stop()
++            } catch (failure: IllegalStateException) {
++                // prepare 未完成时的 stop 是合法语义（放弃加载），忽略状态机异常。
++            }
++        }
++        prepared = false
++        stopped = true
++        paused = true
++        cachedCurrentTime = 0.0
++        mainHandler.removeCallbacks(ticker)
++        emit("stop", JSONObject())
++        abandonFocus()
++    }
++
++    private fun InnerAudioInstance.seek(positionSeconds: Double) {
++        if (destroyed) return
++        lastOp = "seek"
++        val seekToMs = (positionSeconds * 1000).toLong()
++        val target = player
++        if (target == null || !prepared) {
++            // prepare 中/尚未 prepared：先记 pending，onPrepared 时落位。
++            pendingSeekMs = seekToMs.toInt()
++            return
++        }
++        emit("seeking", JSONObject())
++        runCatching { target.seekTo(seekToMs, MediaPlayer.SEEK_PREVIOUS_SYNC) }
++        cachedCurrentTime = positionSeconds
++    }
++
++    private fun InnerAudioInstance.setProperty(params: JSONObject) {
++        if (destroyed) return
++        lastOp = "setProperty"
++        if (params.has("loop")) loop = params.optBoolean("loop", loop)
++        if (params.has("volume")) volume = InnerAudioRules.clampVolume(params.optDouble("volume", volume))
++        if (params.has("playbackRate")) {
++            playbackRate = InnerAudioRules.clampPlaybackRate(params.optDouble("playbackRate", playbackRate))
++        }
++        if (params.has("startTime")) {
++            val value = params.optDouble("startTime", startTime)
++            startTime = if (value.isNaN() || value.isInfinite() || value < 0) 0.0 else value
++        }
++        if (params.has("autoplay")) autoplay = params.optBoolean("autoplay", autoplay)
++        if (params.has("obeyMuteSwitch")) obeyMuteSwitch = params.optBoolean("obeyMuteSwitch", obeyMuteSwitch)
++        player?.let { target ->
++            runCatching { target.isLooping = loop }
++            runCatching { target.setVolume(volume.toFloat(), volume.toFloat()) }
++            if (prepared) applyPlaybackRate(target)
++        }
++    }
++
++    private fun InnerAudioInstance.destroy() {
++        if (destroyed) return
++        destroyed = true
++        mainHandler.removeCallbacks(ticker)
++        abandonFocus()
++        player?.let { target ->
++            runCatching {
++                target.setOnPreparedListener(null)
++                target.setOnCompletionListener(null)
++                target.setOnErrorListener(null)
++                target.setOnSeekCompleteListener(null)
++                target.release()
++            }
++        }
++        player = null
++        listeners.clear()
++    }
++}
+diff --git a/android/dimina/src/main/kotlin/com/didi/dimina/api/media/RecorderApi.kt b/android/dimina/src/main/kotlin/com/didi/dimina/api/media/RecorderApi.kt
+new file mode 100644
+index 0000000..7a429b4
+--- /dev/null
++++ b/android/dimina/src/main/kotlin/com/didi/dimina/api/media/RecorderApi.kt
+@@ -0,0 +1,710 @@
++package com.didi.dimina.api.media
++
++import android.Manifest
++import android.content.Context
++import android.media.AudioAttributes
++import android.media.AudioFocusRequest
++import android.media.AudioFormat
++import android.media.AudioManager
++import android.media.AudioRecord
++import android.media.MediaRecorder
++import android.os.Handler
++import android.os.Looper
++import android.os.SystemClock
++import com.didi.dimina.api.APIResult
++import com.didi.dimina.api.AsyncResult
++import com.didi.dimina.api.BaseApiHandler
++import com.didi.dimina.api.NoneResult
++import com.didi.dimina.common.ApiUtils
++import com.didi.dimina.common.PathUtils
++import com.didi.dimina.ui.container.DiminaActivity
++import org.json.JSONObject
++import java.io.File
++import java.io.RandomAccessFile
++import java.nio.ByteBuffer
++import java.nio.ByteOrder
++import java.util.concurrent.ConcurrentHashMap
++import java.util.concurrent.atomic.AtomicBoolean
++
++/** 录音会话状态机。 */
++internal enum class RecorderState { IDLE, RECORDING, PAUSED }
++
++/**
++ * Recorder 的纯校验/映射规则（不依赖 Android runtime，供单测覆盖）。
++ */
++internal object RecorderRules {
++    /** 微信 RecorderManager 支持的采样率。 */
++    val VALID_SAMPLE_RATES = setOf(8000, 11025, 16000, 22050, 24000, 32000, 44100, 48000)
++    const val MIN_ENCODE_BIT_RATE = 16000
++    const val MAX_ENCODE_BIT_RATE = 320000
++    const val DEFAULT_DURATION_MS = 60000L
++    const val MAX_DURATION_MS = 600000L
++
++    /** 契约 v1:仅 'aac' | 'wav'，其余 fail。 */
++    val VALID_FORMATS = setOf("aac", "wav")
++
++    /** Recorder.onError 的 errCode（契约未钉死分档，统一系统错误档）。 */
++    const val ERR_SYSTEM = 10001
++
++    /** 全部合法返回 null，否则返回 errMsg detail（`Recorder.start:fail <detail>`）。 */
++    fun validateStart(format: String, sampleRate: Int, channels: Int, encodeBitRate: Int): String? = when {
++        format !in VALID_FORMATS -> "invalid format"
++        sampleRate !in VALID_SAMPLE_RATES -> "invalid sampleRate"
++        channels !in 1..2 -> "invalid numberOfChannels"
++        encodeBitRate !in MIN_ENCODE_BIT_RATE..MAX_ENCODE_BIT_RATE -> "invalid encodeBitRate"
++        else -> null
++    }
++
++    /** duration ≤ 0 用默认 60000，超过上限 600000 收敛到上限（微信语义）。 */
++    fun clampDurationMs(durationMs: Long): Long = when {
++        durationMs <= 0 -> DEFAULT_DURATION_MS
++        durationMs > MAX_DURATION_MS -> MAX_DURATION_MS
++        else -> durationMs
++    }
++
++    /** wire 名（Recorder.onXxx / Recorder.offXxx 的 Xxx 部分）→ 规范事件名；未知返回 null。 */
++    fun eventForWire(op: String): String? = when (op) {
++        "onStart", "offStart" -> "start"
++        "onPause", "offPause" -> "pause"
++        "onStop", "offStop" -> "stop"
++        "onError", "offError" -> "error"
++        "onInterruptionBegin", "offInterruptionBegin" -> "interruptionBegin"
++        "onInterruptionEnd", "offInterruptionEnd" -> "interruptionEnd"
++        else -> null
++    }
++
++    /** pause/resume/stop 的状态机校验：非法返回 errMsg detail。 */
++    fun validateOp(state: RecorderState, op: String): String? = when (op) {
++        "pause" -> if (state != RecorderState.RECORDING) "no recording" else null
++        "resume" -> if (state != RecorderState.PAUSED) "no paused recording" else null
++        "stop" -> if (state == RecorderState.IDLE) "no recording" else null
++        else -> null
++    }
++}
++
++/**
++ * 录音活跃时长累计（pause 不计时）。now 注入便于单测，运行时用 SystemClock。
++ */
++internal class ElapsedTimer(private val now: () -> Long) {
++    private var anchor = -1L
++    private var accumulated = 0L
++
++    fun start() {
++        anchor = now()
++    }
++
++    fun pause() {
++        if (anchor >= 0) {
++            accumulated += now() - anchor
++            anchor = -1
++        }
++    }
++
++    fun resume() {
++        if (anchor < 0) anchor = now()
++    }
++
++    fun elapsedMs(): Long = accumulated + if (anchor >= 0) now() - anchor else 0
++
++    fun stop(): Long {
++        pause()
++        return accumulated
++    }
++}
++
++/** 44 字节 PCM16 WAV 头（RIFF/WAVE，契约 wav 格式产物）。 */
++internal fun buildWavHeader(sampleRate: Int, channels: Int, dataSize: Int): ByteArray {
++    val byteRate = sampleRate * channels * 2
++    val blockAlign = channels * 2
++    return ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN)
++        .put("RIFF".toByteArray(Charsets.US_ASCII))
++        .putInt(36 + dataSize)
++        .put("WAVE".toByteArray(Charsets.US_ASCII))
++        .put("fmt ".toByteArray(Charsets.US_ASCII))
++        .putInt(16)
++        .putShort(1) // PCM
++        .putShort(channels.toShort())
++        .putInt(sampleRate)
++        .putInt(byteRate)
++        .putShort(blockAlign.toShort())
++        .putShort(16) // bits per sample
++        .put("data".toByteArray(Charsets.US_ASCII))
++        .putInt(dataSize)
++        .array()
++}
++
++/**
++ * wav 引擎：AudioRecord 直写 PCM，落盘时流式写 WAV（44 字节占位头，stop 时回填长度）。
++ * 读取线程始终消费缓冲（pause 时只丢不写），避免系统音频缓冲溢出；帧数即真实时长。
++ */
++internal class PcmWavRecorder(
++    private val requestedSampleRate: Int,
++    private val channels: Int,
++    maxDurationMs: Long,
++    private val mainHandler: Handler,
++    private val onWorkerError: (String) -> Unit,
++    private val onLimit: () -> Unit,
++) {
++    private var record: AudioRecord? = null
++    private var output: RandomAccessFile? = null
++    private var thread: Thread? = null
++    private var actualRate = requestedSampleRate
++    private val paused = AtomicBoolean(false)
++
++    @Volatile private var running = false
++    private val lock = Any()
++    private var dataSize = 0L
++    private val maxFrames = maxDurationMs * requestedSampleRate / 1000
++
++    val durationMs: Long
++        get() = synchronized(lock) { if (actualRate <= 0) 0L else dataSize / (actualRate * channels * 2) * 1000 }
++    val fileSize: Long
++        get() = 44 + synchronized(lock) { dataSize }
++
++    /** 打开麦克风并开始落盘；失败抛异常由调用方收口。 */
++    fun start(outputFile: File) {
++        val channelIn = if (channels == 2) AudioFormat.CHANNEL_IN_STEREO else AudioFormat.CHANNEL_IN_MONO
++        var opened: AudioRecord? = null
++        for (rate in listOf(requestedSampleRate, 48000, 44100).distinct()) {
++            val minBuffer = AudioRecord.getMinBufferSize(rate, channelIn, AudioFormat.ENCODING_PCM_16BIT)
++            if (minBuffer <= 0) continue
++            val candidate = AudioRecord(
++                MediaRecorder.AudioSource.MIC,
++                rate,
++                channelIn,
++                AudioFormat.ENCODING_PCM_16BIT,
++                maxOf(minBuffer, rate / 5 * 2 * channels), // 至少 200ms
++            )
++            if (candidate.state != AudioRecord.STATE_INITIALIZED) {
++                candidate.release()
++                continue
++            }
++            opened = candidate
++            actualRate = rate
++            break
++        }
++        val recorder = opened ?: throw IllegalStateException("audio record init failed")
++        recorder.startRecording()
++        if (recorder.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
++            recorder.release()
++            throw IllegalStateException("audio record start failed")
++        }
++        record = recorder
++        val out = RandomAccessFile(outputFile, "rws")
++        out.write(buildWavHeader(actualRate, channels, 0))
++        output = out
++        running = true
++        thread = Thread({ captureLoop(recorder, out) }, "DiminaWavRecorder").also { it.start() }
++    }
++
++    private fun captureLoop(recorder: AudioRecord, out: RandomAccessFile) {
++        val chunk = ShortArray(actualRate * 200 / 1000 * channels) // ~200ms
++        val bytes = ByteBuffer.allocate(chunk.size * 2).order(ByteOrder.LITTLE_ENDIAN)
++        var frames = 0L
++        while (running) {
++            val n = try {
++                recorder.read(chunk, 0, chunk.size)
++            } catch (failure: RuntimeException) {
++                postError("could not read microphone: ${failure.message}")
++                break
++            }
++            if (n < 0) {
++                postError("could not read microphone ($n)")
++                break
++            }
++            if (n == 0) continue
++            if (paused.get()) continue // 丢弃，不计时
++            val reachedLimit = frames + n >= maxFrames
++            val take = if (reachedLimit) (maxFrames - frames).toInt() else n
++            bytes.clear()
++            for (i in 0 until take) bytes.putShort(chunk[i])
++            synchronized(lock) {
++                out.write(bytes.array(), 0, take * 2)
++                dataSize += take * 2L
++            }
++            frames += take
++            if (reachedLimit) {
++                running = false
++                mainHandler.post { onLimit() }
++                break
++            }
++        }
++    }
++
++    fun pause() {
++        paused.set(true)
++    }
++
++    fun resume() {
++        paused.set(false)
++    }
++
++    /** 停止采集、回填 WAV 长度；返回 false 表示没有任何有效数据。 */
++    fun stop(): Boolean {
++        running = false
++        paused.set(false)
++        val t = thread
++        thread = null
++        runCatching { t?.join(1000) }
++        val recorder = record
++        record = null
++        runCatching { recorder?.stop() }
++        runCatching { recorder?.release() }
++        val out = output
++        output = null
++        val size = synchronized(lock) { dataSize }
++        if (size <= 0) {
++            runCatching { out?.close() }
++            return false
++        }
++        runCatching {
++            out?.seek(0)
++            out?.write(buildWavHeader(actualRate, channels, size.toInt()))
++            out?.close()
++        }
++        return true
++    }
++
++    private fun postError(detail: String) {
++        running = false
++        mainHandler.post { onWorkerError(detail) }
++    }
++}
++
++/**
++ * Media - RecorderManager 原生实现（契约 v1）。
++ *
++ * 单例 per appId（sessions 键 = appId）；aac = MediaRecorder(AAC_ADTS/AAC)，
++ * wav = AudioRecord 直写 PCM+WAV 头；RECORD_AUDIO 运行时权限拒绝 →
++ * invokeFail `Recorder.start:fail auth deny`；焦点丢失 → interruption 事件。
++ */
++class RecorderApi : BaseApiHandler() {
++    private class Listener(
++        val callbackId: String,
++        val responseCallback: (String) -> Unit,
++    )
++
++    /** 一次 start 的在途请求：权限授权回调落地时使用。 */
++    private class PendingStart(
++        val activity: DiminaActivity,
++        val format: String,
++        val sampleRate: Int,
++        val channels: Int,
++        val encodeBitRate: Int,
++        val durationMs: Long,
++        val params: JSONObject,
++        val responseCallback: (String) -> Unit,
++    )
++
++    /** 单个 appId 的录音会话；所有可变状态只在主线程收敛。 */
++    private inner class Session(val appId: String) {
++        val listeners = ConcurrentHashMap<String, MutableMap<String, Listener>>()
++        var state = RecorderState.IDLE
++        var pendingStart: PendingStart? = null
++        var mediaRecorder: MediaRecorder? = null
++        var wavRecorder: PcmWavRecorder? = null
++        var outputFile: File? = null
++        var format = "aac"
++        val elapsed = ElapsedTimer { SystemClock.elapsedRealtime() }
++        var audioManager: AudioManager? = null
++        var audioFocusRequest: AudioFocusRequest? = null
++        /** 因系统打断（焦点丢失）进入的暂停，焦点恢复时自动续录并发 interruptionEnd。 */
++        var pausedByInterruption = false
++    }
++
++    private val sessions = ConcurrentHashMap<String, Session>()
++    private val mainHandler = Handler(Looper.getMainLooper())
++
++    override val apiNames = setOf(
++        "Recorder.start", "Recorder.pause", "Recorder.resume", "Recorder.stop",
++        "Recorder.onStart", "Recorder.onPause", "Recorder.onStop", "Recorder.onError",
++        "Recorder.onInterruptionBegin", "Recorder.onInterruptionEnd",
++        "Recorder.offStart", "Recorder.offPause", "Recorder.offStop", "Recorder.offError",
++        "Recorder.offInterruptionBegin", "Recorder.offInterruptionEnd",
++    )
++
++    fun clearApp(appId: String) {
++        sessions.remove(appId)?.let { session ->
++            mainHandler.post { session.teardown() }
++        }
++    }
++
++    fun clearAll() {
++        sessions.keys.toList().forEach(::clearApp)
++    }
++
++    override fun handleAction(
++        activity: DiminaActivity,
++        appId: String,
++        apiName: String,
++        params: JSONObject,
++        responseCallback: (String) -> Unit,
++    ): APIResult {
++        val op = apiName.substringAfter('.')
++        return when {
++            op == "start" -> handleStart(activity, appId, params, responseCallback)
++            op == "pause" || op == "resume" -> handlePauseResume(appId, apiName, op)
++            op == "stop" -> handleStop(appId, params, responseCallback)
++            op.startsWith("on") || op.startsWith("off") ->
++                handleListen(appId, apiName, op, params, responseCallback)
++            else -> super.handleAction(activity, appId, apiName, params, responseCallback)
++        }
++    }
++
++    // ---- start：校验 → 权限 → 起引擎 ----
++
++    private fun handleStart(
++        activity: DiminaActivity,
++        appId: String,
++        params: JSONObject,
++        responseCallback: (String) -> Unit,
++    ): APIResult {
++        val format = params.optString("format", "aac").ifBlank { "aac" }
++        val sampleRate = params.optInt("sampleRate", 8000)
++        val channels = params.optInt("numberOfChannels", 1)
++        val encodeBitRate = params.optInt("encodeBitRate", 48000)
++        val durationMs = RecorderRules.clampDurationMs(params.optLong("duration", RecorderRules.DEFAULT_DURATION_MS))
++        RecorderRules.validateStart(format, sampleRate, channels, encodeBitRate)
++            ?.let { detail -> return asyncFail("Recorder.start", detail) }
++
++        val session = sessions.getOrPut(appId) { Session(appId) }
++        if (session.pendingStart != null || session.state != RecorderState.IDLE) {
++            return asyncFail("Recorder.start", "busy")
++        }
++        session.pendingStart = PendingStart(
++            activity, format, sampleRate, channels, encodeBitRate, durationMs, params, responseCallback,
++        )
++        // 权限流照 ScanApi/ContactApi 范式：launcher 需要主线程，统一 post 回主线程收口。
++        runCatching {
++            activity.handleAuthorization(arrayOf(Manifest.permission.RECORD_AUDIO)) { granted ->
++                mainHandler.post { onPermissionResult(appId, granted) }
++            }
++        }.onFailure {
++            session.pendingStart = null
++            return asyncFail("Recorder.start", "activity unavailable")
++        }
++        return NoneResult()
++    }
++
++    private fun onPermissionResult(appId: String, granted: Boolean) {
++        val session = sessions[appId] ?: return
++        val pending = session.pendingStart ?: return
++        session.pendingStart = null
++        if (!granted) {
++            // 契约钉死文案。
++            deliverFail(pending.params, pending.responseCallback, "Recorder.start:fail auth deny")
++            return
++        }
++        startEngine(session, pending)
++    }
++
++    private fun startEngine(session: Session, pending: PendingStart) {
++        val file = try {
++            File.createTempFile(
++                "REC_${System.currentTimeMillis()}",
++                ".${pending.format}",
++                PathUtils.appTempRoot(pending.activity, session.appId),
++            )
++        } catch (failure: Throwable) {
++            deliverFail(pending.params, pending.responseCallback, "Recorder.start:fail temp file failed")
++            return
++        }
++        session.outputFile = file
++        session.format = pending.format
++        session.audioManager = pending.activity.getSystemService(Context.AUDIO_SERVICE) as AudioManager
++        val started = runCatching {
++            if (pending.format == "aac") startAac(session, file, pending) else startWav(session, file, pending)
++        }
++        if (started.isFailure) {
++            session.teardownEngine()
++            deliverFail(pending.params, pending.responseCallback,
++                "Recorder.start:fail ${started.exceptionOrNull()?.message ?: "start failed"}")
++            emit(session, "error", JSONObject()
++                .put("errCode", RecorderRules.ERR_SYSTEM)
++                .put("errMsg", "Recorder.start:fail ${started.exceptionOrNull()?.message ?: "start failed"}"))
++            return
++        }
++        session.state = RecorderState.RECORDING
++        session.elapsed.start()
++        requestFocus(session)
++        deliverSuccess(pending.params, pending.responseCallback, JSONObject().put("errMsg", "Recorder.start:ok"))
++        emit(session, "start", JSONObject())
++    }
++
++    @Suppress("DEPRECATION") // minSdk 26，无 Context 版 MediaRecorder 构造可用
++    private fun startAac(session: Session, file: File, pending: PendingStart) {
++        val recorder = MediaRecorder()
++        session.mediaRecorder = recorder
++        recorder.setAudioSource(MediaRecorder.AudioSource.MIC)
++        recorder.setOutputFormat(MediaRecorder.OutputFormat.AAC_ADTS)
++        recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
++        recorder.setAudioSamplingRate(pending.sampleRate)
++        recorder.setAudioChannels(pending.channels)
++        recorder.setAudioEncodingBitRate(pending.encodeBitRate)
++        recorder.setMaxDuration(pending.durationMs.toInt())
++        recorder.setOutputFile(file.absolutePath)
++        recorder.setOnInfoListener { _, what, _ ->
++            if (what == MediaRecorder.MEDIA_RECORDER_INFO_MAX_DURATION_REACHED) {
++                mainHandler.post { autoStop(session) }
++            }
++        }
++        recorder.setOnErrorListener { _, what, extra ->
++            mainHandler.post { onEngineError(session, "recorder error (what=$what, extra=$extra)") }
++        }
++        recorder.prepare()
++        recorder.start()
++    }
++
++    private fun startWav(session: Session, file: File, pending: PendingStart) {
++        val recorder = PcmWavRecorder(
++            requestedSampleRate = pending.sampleRate,
++            channels = pending.channels,
++            maxDurationMs = pending.durationMs,
++            mainHandler = mainHandler,
++            onWorkerError = { detail -> onEngineError(session, detail) },
++            onLimit = { autoStop(session) },
++        )
++        session.wavRecorder = recorder
++        recorder.start(file)
++    }
++
++    // ---- pause / resume / stop ----
++
++    private fun handlePauseResume(appId: String, apiName: String, op: String): APIResult {
++        val session = sessions[appId] ?: return asyncFail(apiName, "no recording")
++        RecorderRules.validateOp(session.state, op)?.let { detail -> return asyncFail(apiName, detail) }
++        mainHandler.post {
++            when (op) {
++                "pause" -> if (session.state != RecorderState.RECORDING) return@post
++                else -> if (session.state != RecorderState.PAUSED) return@post
++            }
++            if (op == "pause") {
++                runCatching { session.mediaRecorder?.pause() }
++                session.wavRecorder?.pause()
++                session.elapsed.pause()
++                session.state = RecorderState.PAUSED
++                emit(session, "pause", JSONObject())
++            } else {
++                runCatching { session.mediaRecorder?.resume() }
++                session.wavRecorder?.resume()
++                session.elapsed.resume()
++                session.state = RecorderState.RECORDING
++                // 微信没有 onResume 事件，仅恢复计时。
++            }
++        }
++        return asyncOk(apiName)
++    }
++
++    private fun handleStop(appId: String, params: JSONObject, responseCallback: (String) -> Unit): APIResult {
++        val session = sessions[appId] ?: return asyncFail("Recorder.stop", "no recording")
++        RecorderRules.validateOp(session.state, "stop")?.let { detail ->
++            return asyncFail("Recorder.stop", detail)
++        }
++        mainHandler.post {
++            if (session.state == RecorderState.IDLE) {
++                deliverFail(params, responseCallback, "Recorder.stop:fail no recording")
++                return@post
++            }
++            val recorded = finishRecording(session)
++            if (recorded == null) {
++                deliverFail(params, responseCallback, "Recorder.stop:fail no recorded data")
++                emit(session, "error", JSONObject()
++                    .put("errCode", RecorderRules.ERR_SYSTEM)
++                    .put("errMsg", "Recorder.stop:fail no recorded data"))
++            } else {
++                deliverSuccess(params, responseCallback, JSONObject()
++                    .put("tempFilePath", PathUtils.pathToVirtual(recorded.file))
++                    .put("duration", recorded.durationMs)
++                    .put("fileSize", recorded.fileSize)
++                    .put("errMsg", "Recorder.stop:ok"))
++                // onStop 事件 payload 不带 errMsg（契约线协议表）。
++                emit(session, "stop", JSONObject()
++                    .put("tempFilePath", PathUtils.pathToVirtual(recorded.file))
++                    .put("duration", recorded.durationMs)
++                    .put("fileSize", recorded.fileSize))
++            }
++        }
++        return NoneResult()
++    }
++
++    /** duration 到限自动停：只发 onStop 事件（start 的回调早已结清）。 */
++    private fun autoStop(session: Session) {
++        if (session.state == RecorderState.IDLE) return
++        val recorded = finishRecording(session) ?: return
++        emit(session, "stop", JSONObject()
++            .put("tempFilePath", PathUtils.pathToVirtual(recorded.file))
++            .put("duration", recorded.durationMs)
++            .put("fileSize", recorded.fileSize))
++    }
++
++    /** 收口引擎并产出结果；无数据返回 null（会话已复位）。 */
++    private class Recorded(val file: File, val durationMs: Long, val fileSize: Long)
++
++    private fun finishRecording(session: Session): Recorded? {
++        val file = session.outputFile
++        if (file == null) {
++            session.teardownEngine()
++            return null
++        }
++        if (session.format == "aac") {
++            val stopped = runCatching { session.mediaRecorder?.stop() }
++            val durationMs = session.elapsed.stop()
++            if (stopped.isFailure) {
++                session.teardownEngine()
++                return null
++            }
++            return Recorded(file, durationMs, file.length())
++        }
++        val wav = session.wavRecorder
++        val hasData = wav?.stop() == true
++        val durationMs = wav?.durationMs ?: session.elapsed.stop()
++        if (!hasData) {
++            session.teardownEngine()
++            return null
++        }
++        return Recorded(file, durationMs, file.length())
++    }
++
++    private fun onEngineError(session: Session, detail: String) {
++        if (session.state == RecorderState.IDLE) return
++        session.teardownEngine()
++        emit(session, "error", JSONObject()
++            .put("errCode", RecorderRules.ERR_SYSTEM)
++            .put("errMsg", "Recorder.record:fail $detail"))
++    }
++
++    // ---- 事件订阅 ----
++
++    private fun handleListen(
++        appId: String,
++        apiName: String,
++        op: String,
++        params: JSONObject,
++        responseCallback: (String) -> Unit,
++    ): APIResult {
++        val event = RecorderRules.eventForWire(op)
++            ?: return asyncFail(apiName, "unsupported event $op")
++        val session = sessions.getOrPut(appId) { Session(appId) }
++        if (op.startsWith("on")) {
++            val callbackId = params.optString("success")
++            if (callbackId.isEmpty()) return asyncFail(apiName, "invalid callback")
++            session.listeners.getOrPut(event) { ConcurrentHashMap() }[callbackId] =
++                Listener(callbackId, responseCallback)
++        } else {
++            val callbackId = params.optString("success")
++            session.listeners[event]?.let { listeners ->
++                if (callbackId.isEmpty()) listeners.clear() else listeners.remove(callbackId)
++            }
++        }
++        return asyncOk(apiName)
++    }
++
++    private fun emit(session: Session, event: String, payload: JSONObject) {
++        mainHandler.post {
++            session.listeners[event]?.values?.toList()?.forEach { listener ->
++                listener.responseCallback(ApiUtils.createCallbackResponse(listener.callbackId, payload))
++            }
++        }
++    }
++
++    // ---- 音频焦点 ----
++
++    private fun requestFocus(session: Session) {
++        val manager = session.audioManager ?: return
++        if (session.audioFocusRequest != null) return
++        val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
++            .setAudioAttributes(
++                AudioAttributes.Builder()
++                    .setUsage(AudioAttributes.USAGE_MEDIA)
++                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
++                    .build()
++            )
++            .setOnAudioFocusChangeListener { change ->
++                mainHandler.post { onFocusChange(session, change) }
++            }
++            .build()
++        session.audioFocusRequest = request
++        runCatching { manager.requestAudioFocus(request) }
++    }
++
++    private fun abandonFocus(session: Session) {
++        val request = session.audioFocusRequest ?: return
++        session.audioFocusRequest = null
++        val manager = session.audioManager ?: return
++        runCatching { manager.abandonAudioFocusRequest(request) }
++    }
++
++    /** 焦点丢失 → 暂停并 interruptionBegin；恢复 → 续录并 interruptionEnd（契约）。 */
++    private fun onFocusChange(session: Session, change: Int) {
++        if (session.state == RecorderState.IDLE) return
++        when (change) {
++            AudioManager.AUDIOFOCUS_LOSS,
++            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
++            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
++                if (session.state != RecorderState.RECORDING) return
++                runCatching { session.mediaRecorder?.pause() }
++                session.wavRecorder?.pause()
++                session.elapsed.pause()
++                session.state = RecorderState.PAUSED
++                session.pausedByInterruption = true
++                emit(session, "interruptionBegin", JSONObject())
++            }
++            AudioManager.AUDIOFOCUS_GAIN -> {
++                if (!session.pausedByInterruption) return
++                session.pausedByInterruption = false
++                runCatching { session.mediaRecorder?.resume() }
++                session.wavRecorder?.resume()
++                session.elapsed.resume()
++                session.state = RecorderState.RECORDING
++                emit(session, "interruptionEnd", JSONObject())
++            }
++        }
++    }
++
++    // ---- 清理 ----
++
++    private fun Session.teardownEngine() {
++        runCatching { mediaRecorder?.stop() }
++        runCatching { mediaRecorder?.release() }
++        mediaRecorder = null
++        runCatching { wavRecorder?.stop() }
++        wavRecorder = null
++        outputFile = null
++        state = RecorderState.IDLE
++        pausedByInterruption = false
++        abandonFocus(this)
++    }
++
++    private fun Session.teardown() {
++        pendingStart = null
++        teardownEngine()
++        listeners.clear()
++    }
++
++    // ---- 回调投递 ----
++
++    private fun deliverSuccess(
++        params: JSONObject,
++        responseCallback: (String) -> Unit,
++        payload: JSONObject,
++    ) {
++        ApiUtils.invokeSuccess(params, payload, responseCallback)
++        ApiUtils.invokeComplete(params, responseCallback, payload)
++    }
++
++    private fun deliverFail(
++        params: JSONObject,
++        responseCallback: (String) -> Unit,
++        errMsg: String,
++    ) {
++        val payload = JSONObject().put("errMsg", errMsg)
++        ApiUtils.invokeFail(params, payload, responseCallback)
++        ApiUtils.invokeComplete(params, responseCallback, payload)
++    }
++
++    private fun asyncOk(apiName: String): APIResult =
++        AsyncResult(JSONObject().put("errMsg", "$apiName:ok"))
++
++    private fun asyncFail(apiName: String, detail: String): APIResult =
++        AsyncResult(JSONObject().put("errMsg", "$apiName:fail $detail"))
++}
+diff --git a/android/dimina/src/main/kotlin/com/didi/dimina/core/MiniApp.kt b/android/dimina/src/main/kotlin/com/didi/dimina/core/MiniApp.kt
+index 2cd16d9..b6b2801 100644
+--- a/android/dimina/src/main/kotlin/com/didi/dimina/core/MiniApp.kt
++++ b/android/dimina/src/main/kotlin/com/didi/dimina/core/MiniApp.kt
+@@ -22,10 +22,12 @@ import com.didi.dimina.api.device.PhoneApi
+ import com.didi.dimina.api.device.ScanApi
+ import com.didi.dimina.api.device.ScreenApi
+ import com.didi.dimina.api.device.VibrateAPI
++import com.didi.dimina.api.media.AudioApi
+ import com.didi.dimina.api.media.ImageApi
+ import com.didi.dimina.api.media.VideoApi
+ import com.didi.dimina.api.media.VideoToolApi
+ import com.didi.dimina.api.media.VideoDecoderApi
++import com.didi.dimina.api.media.RecorderApi
+ import com.didi.dimina.api.openapi.SettingApi
+ import com.didi.dimina.api.network.LocalNetworkApi
+ import com.didi.dimina.api.route.RouteApi
+@@ -105,6 +107,8 @@ class MiniApp private constructor() {
+     private val apiRegistry = ApiRegistry()
+     private val bluetoothApi = BluetoothApi()
+     private val videoDecoderApi = VideoDecoderApi()
++    private val audioApi = AudioApi()
++    private val recorderApi = RecorderApi()
+     private val localNetworkApi = LocalNetworkApi()
+     private val deviceNetworkApi = com.didi.dimina.api.device.NetworkApi()
+     private val fileApi = FileApi()
+@@ -388,6 +392,8 @@ class MiniApp private constructor() {
+         VideoApi().registerWith(apiRegistry)
+         VideoToolApi().registerWith(apiRegistry)
+         videoDecoderApi.registerWith(apiRegistry)
++        audioApi.registerWith(apiRegistry)
++        recorderApi.registerWith(apiRegistry)
+         SettingApi().registerWith(apiRegistry)
+ 
+         // route
+@@ -609,6 +615,8 @@ class MiniApp private constructor() {
+         deviceNetworkApi.clearApp(appId)
+         fileApi.clearApp(appId)
+         videoDecoderApi.clearApp(appId)
++        audioApi.clearApp(appId)
++        recorderApi.clearApp(appId)
+         // 正在后台写盘的 canvas 导出属于这一代 runtime；换代之后它的回调没有接收方，
+         // 已经发布的文件也不会有人来取。
+         com.didi.dimina.api.media.CanvasExportGeneration.invalidate(appId)
+@@ -646,6 +654,8 @@ class MiniApp private constructor() {
+         com.didi.dimina.api.network.WebSocketManager.shared.disposeAll()
+         deviceNetworkApi.clearAll()
+         fileApi.clearAll()
++        audioApi.clearAll()
++        recorderApi.clearAll()
+ 
+         // Clear all Bridge lists
+         bridgeListMap.clear()
+@@ -659,6 +669,8 @@ class MiniApp private constructor() {
+     fun destroy() {
+         fileApi.clearAll()
+         videoDecoderApi.clearAll()
++        audioApi.clearAll()
++        recorderApi.clearAll()
+         // Clear API resources
+         apiRegistry.clear()
+     }
+diff --git a/android/dimina/src/test/java/com/didi/dimina/api/media/InnerAudioRulesTest.kt b/android/dimina/src/test/java/com/didi/dimina/api/media/InnerAudioRulesTest.kt
+new file mode 100644
+index 0000000..309f8b7
+--- /dev/null
++++ b/android/dimina/src/test/java/com/didi/dimina/api/media/InnerAudioRulesTest.kt
+@@ -0,0 +1,85 @@
++package com.didi.dimina.api.media
++
++import android.media.MediaPlayer
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertNull
++import org.junit.Test
++import java.io.IOException
++
++/** InnerAudioRules 纯函数：errCode 映射、事件归一、参数收敛（契约 v1）。 */
++class InnerAudioRulesTest {
++
++    // ---- errCode 映射：10001 系统 / 10002 网络 / 10003 文件 / 10004 格式 / 10005 解码 ----
++
++    @Test fun unsupportedFormatMapsTo10004() {
++        assertEquals(10004, InnerAudioRules.mapPlayerError(
++            MediaPlayer.MEDIA_ERROR_UNKNOWN, MediaPlayer.MEDIA_ERROR_UNSUPPORTED))
++    }
++
++    @Test fun malformedStreamMapsTo10005() {
++        assertEquals(10005, InnerAudioRules.mapPlayerError(
++            MediaPlayer.MEDIA_ERROR_UNKNOWN, MediaPlayer.MEDIA_ERROR_MALFORMED))
++    }
++
++    @Test fun ioAndTimeoutMapToNetwork10002() {
++        assertEquals(10002, InnerAudioRules.mapPlayerError(
++            MediaPlayer.MEDIA_ERROR_UNKNOWN, MediaPlayer.MEDIA_ERROR_IO))
++        assertEquals(10002, InnerAudioRules.mapPlayerError(
++            MediaPlayer.MEDIA_ERROR_UNKNOWN, MediaPlayer.MEDIA_ERROR_TIMED_OUT))
++    }
++
++    @Test fun serverDiedMapsToSystem10001() {
++        assertEquals(10001, InnerAudioRules.mapPlayerError(
++            MediaPlayer.MEDIA_ERROR_SERVER_DIED, 0))
++    }
++
++    @Test fun unknownErrorsFallBackToSystem10001() {
++        assertEquals(10001, InnerAudioRules.mapPlayerError(MediaPlayer.MEDIA_ERROR_UNKNOWN, -2147483648))
++        assertEquals(10001, InnerAudioRules.mapPlayerError(12345, 6789))
++    }
++
++    @Test fun dataSourcePhaseFailuresMapToMissingFile10003() {
++        assertEquals(10003, InnerAudioRules.mapDataSourceFailure(IOException("file not found")))
++        assertEquals(10003, InnerAudioRules.mapDataSourceFailure(IllegalArgumentException("bad path")))
++        assertEquals(10003, InnerAudioRules.mapDataSourceFailure(IllegalStateException("state")))
++        assertEquals(10001, InnerAudioRules.mapDataSourceFailure(RuntimeException("unexpected")))
++    }
++
++    // ---- 事件归一：契约钉死裸驼峰名，on 前缀容错 ----
++
++    @Test fun contractCanonicalEventNamesPassThrough() {
++        InnerAudioRules.CANONICAL_EVENTS.forEach { event ->
++            assertEquals(event, InnerAudioRules.normalizeEvent(event))
++        }
++    }
++
++    @Test fun onPrefixedEventNamesAreTolerated() {
++        assertEquals("timeUpdate", InnerAudioRules.normalizeEvent("onTimeUpdate"))
++        assertEquals("canplay", InnerAudioRules.normalizeEvent("onCanplay"))
++        assertEquals("loadedmetadata", InnerAudioRules.normalizeEvent("OnLoadedmetadata"))
++    }
++
++    @Test fun unknownEventsAreRejected() {
++        assertNull(InnerAudioRules.normalizeEvent("onFrameRecorded"))
++        assertNull(InnerAudioRules.normalizeEvent("loading"))
++        assertNull(InnerAudioRules.normalizeEvent(""))
++        assertNull(InnerAudioRules.normalizeEvent("on"))
++    }
++
++    // ---- 参数收敛 ----
++
++    @Test fun volumeIsClampedIntoZeroToOne() {
++        assertEquals(0.0, InnerAudioRules.clampVolume(-0.5), 0.0)
++        assertEquals(1.0, InnerAudioRules.clampVolume(1.7), 0.0)
++        assertEquals(0.5, InnerAudioRules.clampVolume(0.5), 0.0)
++        assertEquals(1.0, InnerAudioRules.clampVolume(Double.NaN), 0.0)
++    }
++
++    @Test fun playbackRateIsClampedIntoHalfToTwo() {
++        assertEquals(0.5, InnerAudioRules.clampPlaybackRate(0.2), 0.0)
++        assertEquals(2.0, InnerAudioRules.clampPlaybackRate(5.0), 0.0)
++        assertEquals(1.5, InnerAudioRules.clampPlaybackRate(1.5), 0.0)
++        assertEquals(1.0, InnerAudioRules.clampPlaybackRate(Double.NaN), 0.0)
++        assertEquals(1.0, InnerAudioRules.clampPlaybackRate(Double.POSITIVE_INFINITY), 0.0)
++    }
++}
+diff --git a/android/dimina/src/test/java/com/didi/dimina/api/media/RecorderRulesTest.kt b/android/dimina/src/test/java/com/didi/dimina/api/media/RecorderRulesTest.kt
+new file mode 100644
+index 0000000..d4a609e
+--- /dev/null
++++ b/android/dimina/src/test/java/com/didi/dimina/api/media/RecorderRulesTest.kt
+@@ -0,0 +1,169 @@
++package com.didi.dimina.api.media
++
++import org.junit.Assert.assertArrayEquals
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertNotNull
++import org.junit.Assert.assertNull
++import org.junit.Test
++
++/** RecorderRules 纯函数：参数校验、状态机、事件映射、计时器、WAV 头（契约 v1）。 */
++class RecorderRulesTest {
++
++    // ---- start 参数校验：format 仅 aac|wav，其余 fail ----
++
++    @Test fun aacAndWavAreTheOnlyAcceptedFormats() {
++        assertNull(RecorderRules.validateStart("aac", 8000, 1, 48000))
++        assertNull(RecorderRules.validateStart("wav", 44100, 2, 48000))
++        assertEquals("invalid format", RecorderRules.validateStart("mp3", 8000, 1, 48000))
++        assertEquals("invalid format", RecorderRules.validateStart("PCM", 8000, 1, 48000))
++        assertEquals("invalid format", RecorderRules.validateStart("", 8000, 1, 48000))
++    }
++
++    @Test fun sampleRateMustBeAWeChatSupportedRate() {
++        assertEquals("invalid sampleRate", RecorderRules.validateStart("aac", 8001, 1, 48000))
++        assertEquals("invalid sampleRate", RecorderRules.validateStart("aac", 44101, 1, 48000))
++        RecorderRules.VALID_SAMPLE_RATES.forEach { rate ->
++            assertNull(RecorderRules.validateStart("aac", rate, 1, 48000))
++        }
++    }
++
++    @Test fun channelCountIsRestrictedToOneOrTwo() {
++        assertNull(RecorderRules.validateStart("aac", 16000, 2, 48000))
++        assertEquals("invalid numberOfChannels", RecorderRules.validateStart("aac", 16000, 0, 48000))
++        assertEquals("invalid numberOfChannels", RecorderRules.validateStart("aac", 16000, 3, 48000))
++    }
++
++    @Test fun encodeBitRateHasBounds() {
++        assertNull(RecorderRules.validateStart("aac", 16000, 1, 16000))
++        assertNull(RecorderRules.validateStart("aac", 16000, 1, 320000))
++        assertEquals("invalid encodeBitRate", RecorderRules.validateStart("aac", 16000, 1, 15999))
++        assertEquals("invalid encodeBitRate", RecorderRules.validateStart("aac", 16000, 1, 320001))
++    }
++
++    // ---- duration：默认 60000，上限 600000 ----
++
++    @Test fun durationIsDefaultedAndCapped() {
++        assertEquals(60000L, RecorderRules.clampDurationMs(0L))
++        assertEquals(60000L, RecorderRules.clampDurationMs(-5L))
++        assertEquals(30000L, RecorderRules.clampDurationMs(30000L))
++        assertEquals(600000L, RecorderRules.clampDurationMs(600000L))
++        assertEquals(600000L, RecorderRules.clampDurationMs(700000L))
++    }
++
++    // ---- 事件 wire 名映射 ----
++
++    @Test fun onAndOffWireNamesMapToCanonicalEvents() {
++        assertEquals("start", RecorderRules.eventForWire("onStart"))
++        assertEquals("pause", RecorderRules.eventForWire("onPause"))
++        assertEquals("stop", RecorderRules.eventForWire("onStop"))
++        assertEquals("error", RecorderRules.eventForWire("onError"))
++        assertEquals("interruptionBegin", RecorderRules.eventForWire("onInterruptionBegin"))
++        assertEquals("interruptionEnd", RecorderRules.eventForWire("onInterruptionEnd"))
++        assertEquals("start", RecorderRules.eventForWire("offStart"))
++        assertEquals("interruptionBegin", RecorderRules.eventForWire("offInterruptionBegin"))
++        assertEquals("interruptionEnd", RecorderRules.eventForWire("offInterruptionEnd"))
++    }
++
++    @Test fun frameRecordedIsNeverSupported() {
++        assertNull(RecorderRules.eventForWire("onFrameRecorded"))
++        assertNull(RecorderRules.eventForWire("offFrameRecorded"))
++        assertNull(RecorderRules.eventForWire("onResume"))
++        assertNull(RecorderRules.eventForWire("start"))
++    }
++
++    // ---- 状态机：pause/resume/stop 的合法迁移 ----
++
++    @Test fun pauseRequiresActiveRecording() {
++        assertNull(RecorderRules.validateOp(RecorderState.RECORDING, "pause"))
++        assertNotNull(RecorderRules.validateOp(RecorderState.IDLE, "pause"))
++        assertNotNull(RecorderRules.validateOp(RecorderState.PAUSED, "pause"))
++    }
++
++    @Test fun resumeRequiresPausedRecording() {
++        assertNull(RecorderRules.validateOp(RecorderState.PAUSED, "resume"))
++        assertNotNull(RecorderRules.validateOp(RecorderState.RECORDING, "resume"))
++        assertNotNull(RecorderRules.validateOp(RecorderState.IDLE, "resume"))
++    }
++
++    @Test fun stopWorksFromRecordingOrPausedOnly() {
++        assertNull(RecorderRules.validateOp(RecorderState.RECORDING, "stop"))
++        assertNull(RecorderRules.validateOp(RecorderState.PAUSED, "stop"))
++        assertNotNull(RecorderRules.validateOp(RecorderState.IDLE, "stop"))
++    }
++}
++
++/** ElapsedTimer：pause 期间不计时（aac 时长口径）。 */
++class ElapsedTimerTest {
++    private class FakeClock {
++        var nowMs = 1000L
++        fun tick(delta: Long) {
++            nowMs += delta
++        }
++    }
++
++    @Test fun pausedSpansDoNotAccumulate() {
++        val clock = FakeClock()
++        val timer = ElapsedTimer { clock.nowMs }
++        timer.start()
++        clock.tick(1000)
++        timer.pause() // 累计 1000ms
++        clock.tick(5000) // 暂停期间：不计
++        assertEquals(1000L, timer.elapsedMs())
++        timer.resume()
++        clock.tick(500)
++        assertEquals(1500L, timer.elapsedMs())
++        assertEquals(1500L, timer.stop())
++        clock.tick(100)
++        assertEquals(1500L, timer.elapsedMs())
++    }
++
++    @Test fun elapsedWhileRunningIncludesOpenSpan() {
++        val clock = FakeClock()
++        val timer = ElapsedTimer { clock.nowMs }
++        timer.start()
++        clock.tick(250)
++        assertEquals(250L, timer.elapsedMs())
++        clock.tick(250)
++        assertEquals(500L, timer.elapsedMs())
++    }
++}
++
++/** WAV 头字节布局（wav 引擎产物契约：44 字节 PCM16 RIFF/WAVE）。 */
++class WavHeaderTest {
++    @Test fun headerMatchesCanonicalWavLayout() {
++        val sampleRate = 16000
++        val channels = 1
++        val dataSize = 32000
++        val header = buildWavHeader(sampleRate, channels, dataSize)
++        assertEquals(44, header.size)
++        assertArrayEquals("RIFF".toByteArray(), header.copyOfRange(0, 4))
++        assertEquals(36 + dataSize, readIntLe(header, 4))
++        assertArrayEquals("WAVE".toByteArray(), header.copyOfRange(8, 12))
++        assertArrayEquals("fmt ".toByteArray(), header.copyOfRange(12, 16))
++        assertEquals(16, readIntLe(header, 16)) // fmt chunk size
++        assertEquals(1, readShortLe(header, 20)) // PCM
++        assertEquals(channels, readShortLe(header, 22))
++        assertEquals(sampleRate, readIntLe(header, 24))
++        assertEquals(sampleRate * channels * 2, readIntLe(header, 28)) // byte rate
++        assertEquals(channels * 2, readShortLe(header, 32)) // block align
++        assertEquals(16, readShortLe(header, 34)) // bits per sample
++        assertArrayEquals("data".toByteArray(), header.copyOfRange(36, 40))
++        assertEquals(dataSize, readIntLe(header, 40))
++    }
++
++    @Test fun stereoHeaderScalesByteRateAndBlockAlign() {
++        val header = buildWavHeader(48000, 2, 96000)
++        assertEquals(48000 * 2 * 2, readIntLe(header, 28))
++        assertEquals(4, readShortLe(header, 32))
++        assertEquals(2, readShortLe(header, 22))
++    }
++
++    private fun readIntLe(bytes: ByteArray, offset: Int): Int =
++        ((bytes[offset].toInt() and 0xFF) or
++            ((bytes[offset + 1].toInt() and 0xFF) shl 8) or
++            ((bytes[offset + 2].toInt() and 0xFF) shl 16) or
++            ((bytes[offset + 3].toInt() and 0xFF) shl 24))
++
++    private fun readShortLe(bytes: ByteArray, offset: Int): Int =
++        (bytes[offset].toInt() and 0xFF) or ((bytes[offset + 1].toInt() and 0xFF) shl 8)
++}
+-- 
+2.50.1 (Apple Git-155)
+

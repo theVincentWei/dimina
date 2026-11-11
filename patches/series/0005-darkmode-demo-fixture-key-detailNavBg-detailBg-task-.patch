@@ -1,0 +1,344 @@
+From f39beac5312ec18fa544762b091aa668f4596935 Mon Sep 17 00:00:00 2001
+From: Wei Mingchen <weimingchen1997@qq.com>
+Date: Mon, 9 Nov 2026 20:03:13 +0800
+Subject: [PATCH 05/25] =?UTF-8?q?darkmode-demo=20fixture=20=E5=A2=9E?=
+ =?UTF-8?q?=E5=8A=A0=E7=AC=AC=E4=BA=8C=E9=A1=B5=E9=9D=A2:=E9=A1=B5?=
+ =?UTF-8?q?=E9=9D=A2=E7=BA=A7=20@key=20=E5=BC=95=E7=94=A8(detailNavBg/deta?=
+ =?UTF-8?q?ilBg)=E9=AA=8C=E8=AF=81=E9=A1=B5=E9=9D=A2=E9=85=8D=E7=BD=AE?=
+ =?UTF-8?q?=E8=A6=86=E7=9B=96=E5=85=A8=E5=B1=80,=E4=B8=BA=E5=AE=B9?=
+ =?UTF-8?q?=E5=99=A8=E9=A1=B5=E9=9D=A2=E7=BA=A7=E5=8F=98=E9=87=8F=E8=A7=A3?=
+ =?UTF-8?q?=E6=9E=90(task-4)=E5=A4=87=E6=96=99?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- app.json 注册 pages/detail/detail;theme.json light/dark 补 detailNavBg/detailBg(蓝调,与首页灰调明显不同色)
+- 首页加 navigator 跳转入口;详情页顶层 json 字段直接放 @ 引用(navigationBarBackgroundColor/backgroundColor/navigationBarTextStyle 复用全局 @navTxtStyle)
+- 自测:dmcc 退出 0,程序化断言 12/12(modules[pagePath] 顶层字段原样透传、theme 四新键两套齐、全局 @ 与未定义 @bgTopColor 不受影响、css 保留 media query);单测 7/7 仍绿
+---
+ .../compiler/darkmode-demo-page-level.patch   | 81 +++++++++++++++++++
+ test-fixtures/darkmode-demo/app.json          |  3 +-
+ .../darkmode-demo/pages/detail/detail.js      | 20 +++++
+ .../darkmode-demo/pages/detail/detail.json    |  6 ++
+ .../darkmode-demo/pages/detail/detail.wxml    | 14 ++++
+ .../darkmode-demo/pages/detail/detail.wxss    | 75 +++++++++++++++++
+ .../darkmode-demo/pages/index/index.wxml      |  1 +
+ .../darkmode-demo/pages/index/index.wxss      | 16 ++++
+ test-fixtures/darkmode-demo/theme.json        |  8 +-
+ 9 files changed, 221 insertions(+), 3 deletions(-)
+ create mode 100644 fe/packages/compiler/darkmode-demo-page-level.patch
+ create mode 100644 test-fixtures/darkmode-demo/pages/detail/detail.js
+ create mode 100644 test-fixtures/darkmode-demo/pages/detail/detail.json
+ create mode 100644 test-fixtures/darkmode-demo/pages/detail/detail.wxml
+ create mode 100644 test-fixtures/darkmode-demo/pages/detail/detail.wxss
+
+diff --git a/fe/packages/compiler/darkmode-demo-page-level.patch b/fe/packages/compiler/darkmode-demo-page-level.patch
+new file mode 100644
+index 0000000..14fe9d3
+--- /dev/null
++++ b/fe/packages/compiler/darkmode-demo-page-level.patch
+@@ -0,0 +1,81 @@
++diff --git a/test-fixtures/darkmode-demo/app.json b/test-fixtures/darkmode-demo/app.json
++index bd02dc6..2dc92a4 100644
++--- a/test-fixtures/darkmode-demo/app.json
+++++ b/test-fixtures/darkmode-demo/app.json
++@@ -1,6 +1,7 @@
++ {
++ 	"pages": [
++-		"pages/index/index"
+++		"pages/index/index",
+++		"pages/detail/detail"
++ 	],
++ 	"darkmode": true,
++ 	"themeLocation": "theme.json",
++diff --git a/test-fixtures/darkmode-demo/pages/index/index.wxml b/test-fixtures/darkmode-demo/pages/index/index.wxml
++index dbd9c7c..2317534 100644
++--- a/test-fixtures/darkmode-demo/pages/index/index.wxml
+++++ b/test-fixtures/darkmode-demo/pages/index/index.wxml
++@@ -9,5 +9,6 @@
++ 			<text class="label">验证点</text>
++ 			<text class="desc">切换系统深浅色:导航栏/TabBar 走 theme.json @变量,本段文案走 @media (prefers-color-scheme) 查询,onThemeChange 输出到控制台</text>
++ 		</view>
+++		<navigator class="detail-link" url="/pages/detail/detail">进入详情页(页面级 @引用) »</navigator>
++ 	</view>
++ </view>
++diff --git a/test-fixtures/darkmode-demo/pages/index/index.wxss b/test-fixtures/darkmode-demo/pages/index/index.wxss
++index 6f1aa60..9ed184d 100644
++--- a/test-fixtures/darkmode-demo/pages/index/index.wxss
+++++ b/test-fixtures/darkmode-demo/pages/index/index.wxss
++@@ -39,6 +39,17 @@
++ 	color: #444444;
++ }
++ 
+++.detail-link {
+++	display: block;
+++	margin-top: 40rpx;
+++	padding: 20rpx 0;
+++	text-align: center;
+++	border-radius: 12rpx;
+++	background-color: #e8f3ff;
+++	color: #1f6fd6;
+++	font-size: 28rpx;
+++}
+++
++ /* 页面内容层深浅色切换:与壳层 theme.json 变量独立,由 WebView 原生媒体查询驱动 */
++ @media (prefers-color-scheme: dark) {
++ 	.page {
++@@ -56,4 +67,9 @@
++ 	.desc {
++ 		color: #b3b3b3;
++ 	}
+++
+++	.detail-link {
+++		background-color: #1a3557;
+++		color: #7cb0f5;
+++	}
++ }
++diff --git a/test-fixtures/darkmode-demo/theme.json b/test-fixtures/darkmode-demo/theme.json
++index 5839546..aac5d89 100644
++--- a/test-fixtures/darkmode-demo/theme.json
+++++ b/test-fixtures/darkmode-demo/theme.json
++@@ -7,7 +7,9 @@
++ 		"tabColor": "#8c8c8c",
++ 		"tabSelectedColor": "#07c160",
++ 		"tabBgColor": "#ffffff",
++-		"tabBorderStyle": "black"
+++		"tabBorderStyle": "black",
+++		"detailNavBg": "#e8f3ff",
+++		"detailBg": "#f0f7ff"
++ 	},
++ 	"dark": {
++ 		"navBgColor": "#1a1a1a",
++@@ -17,6 +19,8 @@
++ 		"tabColor": "#7f7f7f",
++ 		"tabSelectedColor": "#07c160",
++ 		"tabBgColor": "#191919",
++-		"tabBorderStyle": "white"
+++		"tabBorderStyle": "white",
+++		"detailNavBg": "#12233d",
+++		"detailBg": "#0d1a2b"
++ 	}
++ }
+diff --git a/test-fixtures/darkmode-demo/app.json b/test-fixtures/darkmode-demo/app.json
+index bd02dc6..2dc92a4 100644
+--- a/test-fixtures/darkmode-demo/app.json
++++ b/test-fixtures/darkmode-demo/app.json
+@@ -1,6 +1,7 @@
+ {
+ 	"pages": [
+-		"pages/index/index"
++		"pages/index/index",
++		"pages/detail/detail"
+ 	],
+ 	"darkmode": true,
+ 	"themeLocation": "theme.json",
+diff --git a/test-fixtures/darkmode-demo/pages/detail/detail.js b/test-fixtures/darkmode-demo/pages/detail/detail.js
+new file mode 100644
+index 0000000..967b80f
+--- /dev/null
++++ b/test-fixtures/darkmode-demo/pages/detail/detail.js
+@@ -0,0 +1,20 @@
++Page({
++	data: {
++		theme: '',
++	},
++
++	onLoad() {
++		// 页面级配置验证点:本页 window 字段用页面专属 @key(detailNavBg/detailBg),
++		// 与全局 window(navBgColor/bgColor)不同色;切主题时每页按自己引用的变量解析
++		wx.onThemeChange((res) => {
++			console.log('[darkmode-demo][detail] onThemeChange:', res)
++			this.setData({ theme: res.theme })
++		})
++
++		const theme = wx.getSystemInfoSync().theme
++		console.log('[darkmode-demo][detail] systemInfo.theme:', theme)
++		if (theme) {
++			this.setData({ theme })
++		}
++	},
++})
+diff --git a/test-fixtures/darkmode-demo/pages/detail/detail.json b/test-fixtures/darkmode-demo/pages/detail/detail.json
+new file mode 100644
+index 0000000..cdd9686
+--- /dev/null
++++ b/test-fixtures/darkmode-demo/pages/detail/detail.json
+@@ -0,0 +1,6 @@
++{
++	"navigationBarTitleText": "详情页",
++	"navigationBarBackgroundColor": "@detailNavBg",
++	"navigationBarTextStyle": "@navTxtStyle",
++	"backgroundColor": "@detailBg"
++}
+diff --git a/test-fixtures/darkmode-demo/pages/detail/detail.wxml b/test-fixtures/darkmode-demo/pages/detail/detail.wxml
+new file mode 100644
+index 0000000..ceba062
+--- /dev/null
++++ b/test-fixtures/darkmode-demo/pages/detail/detail.wxml
+@@ -0,0 +1,14 @@
++<view class="detail">
++	<view class="card">
++		<text class="title">详情页(页面级 @引用)</text>
++		<view class="row">
++			<text class="label">当前主题</text>
++			<text class="value">{{theme || '未获取'}}</text>
++		</view>
++		<view class="row">
++			<text class="label">验证点</text>
++			<text class="desc">本页导航栏/窗口背景用页面级 @detailNavBg/@detailBg(蓝调),覆盖全局 window 的 @navBgColor/@bgColor(灰调);切主题时本页按自己的变量解析</text>
++		</view>
++		<navigator class="back-link" url="/pages/index/index" open-type="navigateBack">返回首页</navigator>
++	</view>
++</view>
+diff --git a/test-fixtures/darkmode-demo/pages/detail/detail.wxss b/test-fixtures/darkmode-demo/pages/detail/detail.wxss
+new file mode 100644
+index 0000000..4b7bbd9
+--- /dev/null
++++ b/test-fixtures/darkmode-demo/pages/detail/detail.wxss
+@@ -0,0 +1,75 @@
++.detail {
++	min-height: 100vh;
++	padding: 48rpx 32rpx;
++	box-sizing: border-box;
++	background-color: #f0f7ff;
++}
++
++.card {
++	padding: 40rpx;
++	border-radius: 16rpx;
++	background-color: #ffffff;
++}
++
++.title {
++	font-size: 40rpx;
++	font-weight: 600;
++	color: #0f2547;
++}
++
++.row {
++	margin-top: 24rpx;
++}
++
++.label {
++	display: block;
++	font-size: 24rpx;
++	color: #7a94b8;
++}
++
++.value {
++	font-size: 34rpx;
++	font-weight: 600;
++	color: #1f6fd6;
++}
++
++.desc {
++	font-size: 26rpx;
++	line-height: 1.6;
++	color: #33475e;
++}
++
++.back-link {
++	display: block;
++	margin-top: 40rpx;
++	padding: 20rpx 0;
++	text-align: center;
++	border-radius: 12rpx;
++	background-color: #e8f3ff;
++	color: #1f6fd6;
++	font-size: 28rpx;
++}
++
++/* 页面内容层深浅色切换:蓝调深色,与首页灰调区分 */
++@media (prefers-color-scheme: dark) {
++	.detail {
++		background-color: #0d1a2b;
++	}
++
++	.card {
++		background-color: #12233d;
++	}
++
++	.title {
++		color: #e3edff;
++	}
++
++	.desc {
++		color: #9db4d4;
++	}
++
++	.back-link {
++		background-color: #1a3557;
++		color: #7cb0f5;
++	}
++}
+diff --git a/test-fixtures/darkmode-demo/pages/index/index.wxml b/test-fixtures/darkmode-demo/pages/index/index.wxml
+index dbd9c7c..2317534 100644
+--- a/test-fixtures/darkmode-demo/pages/index/index.wxml
++++ b/test-fixtures/darkmode-demo/pages/index/index.wxml
+@@ -9,5 +9,6 @@
+ 			<text class="label">验证点</text>
+ 			<text class="desc">切换系统深浅色:导航栏/TabBar 走 theme.json @变量,本段文案走 @media (prefers-color-scheme) 查询,onThemeChange 输出到控制台</text>
+ 		</view>
++		<navigator class="detail-link" url="/pages/detail/detail">进入详情页(页面级 @引用) »</navigator>
+ 	</view>
+ </view>
+diff --git a/test-fixtures/darkmode-demo/pages/index/index.wxss b/test-fixtures/darkmode-demo/pages/index/index.wxss
+index 6f1aa60..9ed184d 100644
+--- a/test-fixtures/darkmode-demo/pages/index/index.wxss
++++ b/test-fixtures/darkmode-demo/pages/index/index.wxss
+@@ -39,6 +39,17 @@
+ 	color: #444444;
+ }
+ 
++.detail-link {
++	display: block;
++	margin-top: 40rpx;
++	padding: 20rpx 0;
++	text-align: center;
++	border-radius: 12rpx;
++	background-color: #e8f3ff;
++	color: #1f6fd6;
++	font-size: 28rpx;
++}
++
+ /* 页面内容层深浅色切换:与壳层 theme.json 变量独立,由 WebView 原生媒体查询驱动 */
+ @media (prefers-color-scheme: dark) {
+ 	.page {
+@@ -56,4 +67,9 @@
+ 	.desc {
+ 		color: #b3b3b3;
+ 	}
++
++	.detail-link {
++		background-color: #1a3557;
++		color: #7cb0f5;
++	}
+ }
+diff --git a/test-fixtures/darkmode-demo/theme.json b/test-fixtures/darkmode-demo/theme.json
+index 5839546..aac5d89 100644
+--- a/test-fixtures/darkmode-demo/theme.json
++++ b/test-fixtures/darkmode-demo/theme.json
+@@ -7,7 +7,9 @@
+ 		"tabColor": "#8c8c8c",
+ 		"tabSelectedColor": "#07c160",
+ 		"tabBgColor": "#ffffff",
+-		"tabBorderStyle": "black"
++		"tabBorderStyle": "black",
++		"detailNavBg": "#e8f3ff",
++		"detailBg": "#f0f7ff"
+ 	},
+ 	"dark": {
+ 		"navBgColor": "#1a1a1a",
+@@ -17,6 +19,8 @@
+ 		"tabColor": "#7f7f7f",
+ 		"tabSelectedColor": "#07c160",
+ 		"tabBgColor": "#191919",
+-		"tabBorderStyle": "white"
++		"tabBorderStyle": "white",
++		"detailNavBg": "#12233d",
++		"detailBg": "#0d1a2b"
+ 	}
+ }
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,1249 @@
+From ebcbb50935d65b581fb4777fd14a8906665f1533 Mon Sep 17 00:00:00 2001
+From: Wei Mingchen <weimingchen1997@qq.com>
+Date: Tue, 10 Nov 2026 19:57:14 +0800
+Subject: [PATCH 18/25] =?UTF-8?q?feat:service=20=E5=B1=82=E6=96=B0?=
+ =?UTF-8?q?=E5=A2=9E=E9=9F=B3=E9=A2=91=E6=8E=A5=E5=8F=A3=20InnerAudioConte?=
+ =?UTF-8?q?xt=20+=20RecorderManager?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 新增 fe/packages/service/src/api/core/media/audio/index.js:createInnerAudioContext
+  (全属性/方法/11 事件,src 赋值即触发 InnerAudio.setSrc,duration/currentTime/paused 走
+  InnerAudio.getState 同步回执并缓存)与 getRecorderManager(单例;start 仅 aac/wav,
+  非法 format 走 onError,duration 默认 60000/上限 600000)
+- wire 通道按契约:控制/属性调用带一次性成对 success/fail 回调 id,事件订阅
+  callback.store(cb, true) 常驻 id + InnerAudio.on/off / Recorder.onXxx/offXxx;
+  同一回调挂多事件/多实例共享常驻 id,引用计数归零才摘回调表
+- api/index.js blockedPublicApiNames 补全部 InnerAudio.*/Recorder.* wire 名,
+  防 native 注册表把非微信名挂上 wx
+- docs/API-Reference.md 补媒体-音频段(Android ✓,其余平台后续轮)并重跑
+  sync:compat 再生成 compatibility-reference.js(+45 条)
+- 测试:audio.spec.js(50 用例)+ audio-wx-namespace.spec.js(2 用例),
+  service 全量 973 过 / compiler 全量 353 过 / oxlint 0 警告
+---
+ docs/API-Reference.md                         |  46 ++
+ .../src/common/compatibility-reference.js     |  45 ++
+ .../__tests__/audio-wx-namespace.spec.js      |  83 +++
+ fe/packages/service/__tests__/audio.spec.js   | 476 ++++++++++++++++++
+ .../service/src/api/core/media/audio/index.js | 474 +++++++++++++++++
+ fe/packages/service/src/api/index.js          |  29 ++
+ 6 files changed, 1153 insertions(+)
+ create mode 100644 fe/packages/service/__tests__/audio-wx-namespace.spec.js
+ create mode 100644 fe/packages/service/__tests__/audio.spec.js
+ create mode 100644 fe/packages/service/src/api/core/media/audio/index.js
+
+diff --git a/docs/API-Reference.md b/docs/API-Reference.md
+index f863678..146dd26 100644
+--- a/docs/API-Reference.md
++++ b/docs/API-Reference.md
+@@ -407,6 +407,51 @@ DMPApp.init(context, { virtualFilePrefix: 'host-file://' })
+ |               | VideoDecoder.getFrameData        | ✓       | ✓   | ✓       | ✓   |
+ |               | VideoDecoder.on                  | ✓       | ✓   | ✓       | ✓   |
+ |               | VideoDecoder.off                 | ✓       | ✓   | ✓       | ✓   |
++| 媒体 - 音频   | createInnerAudioContext          | ✓       | ✗   | ✗       | ✗   |
++|               | InnerAudioContext.play           | ✓       | ✗   | ✗       | ✗   |
++|               | InnerAudioContext.pause          | ✓       | ✗   | ✗       | ✗   |
++|               | InnerAudioContext.stop           | ✓       | ✗   | ✗       | ✗   |
++|               | InnerAudioContext.seek           | ✓       | ✗   | ✗       | ✗   |
++|               | InnerAudioContext.destroy        | ✓       | ✗   | ✗       | ✗   |
++|               | InnerAudioContext.onCanplay      | ✓       | ✗   | ✗       | ✗   |
++|               | InnerAudioContext.offCanplay     | ✓       | ✗   | ✗       | ✗   |
++|               | InnerAudioContext.onPlay         | ✓       | ✗   | ✗       | ✗   |
++|               | InnerAudioContext.offPlay        | ✓       | ✗   | ✗       | ✗   |
++|               | InnerAudioContext.onPause        | ✓       | ✗   | ✗       | ✗   |
++|               | InnerAudioContext.offPause       | ✓       | ✗   | ✗       | ✗   |
++|               | InnerAudioContext.onStop         | ✓       | ✗   | ✗       | ✗   |
++|               | InnerAudioContext.offStop        | ✓       | ✗   | ✗       | ✗   |
++|               | InnerAudioContext.onEnded        | ✓       | ✗   | ✗       | ✗   |
++|               | InnerAudioContext.offEnded       | ✓       | ✗   | ✗       | ✗   |
++|               | InnerAudioContext.onTimeUpdate   | ✓       | ✗   | ✗       | ✗   |
++|               | InnerAudioContext.offTimeUpdate  | ✓       | ✗   | ✗       | ✗   |
++|               | InnerAudioContext.onError        | ✓       | ✗   | ✗       | ✗   |
++|               | InnerAudioContext.offError       | ✓       | ✗   | ✗       | ✗   |
++|               | InnerAudioContext.onWaiting      | ✓       | ✗   | ✗       | ✗   |
++|               | InnerAudioContext.offWaiting     | ✓       | ✗   | ✗       | ✗   |
++|               | InnerAudioContext.onSeeking      | ✓       | ✗   | ✗       | ✗   |
++|               | InnerAudioContext.offSeeking     | ✓       | ✗   | ✗       | ✗   |
++|               | InnerAudioContext.onSeeked       | ✓       | ✗   | ✗       | ✗   |
++|               | InnerAudioContext.offSeeked      | ✓       | ✗   | ✗       | ✗   |
++|               | InnerAudioContext.onLoadedmetadata | ✓     | ✗   | ✗       | ✗   |
++|               | InnerAudioContext.offLoadedmetadata | ✓    | ✗   | ✗       | ✗   |
++|               | getRecorderManager               | ✓       | ✗   | ✗       | ✗   |
++|               | RecorderManager.start            | ✓       | ✗   | ✗       | ✗   |
++|               | RecorderManager.pause            | ✓       | ✗   | ✗       | ✗   |
++|               | RecorderManager.resume           | ✓       | ✗   | ✗       | ✗   |
++|               | RecorderManager.stop             | ✓       | ✗   | ✗       | ✗   |
++|               | RecorderManager.onStart          | ✓       | ✗   | ✗       | ✗   |
++|               | RecorderManager.offStart         | ✓       | ✗   | ✗       | ✗   |
++|               | RecorderManager.onPause          | ✓       | ✗   | ✗       | ✗   |
++|               | RecorderManager.offPause         | ✓       | ✗   | ✗       | ✗   |
++|               | RecorderManager.onStop           | ✓       | ✗   | ✗       | ✗   |
++|               | RecorderManager.offStop          | ✓       | ✗   | ✗       | ✗   |
++|               | RecorderManager.onError          | ✓       | ✗   | ✗       | ✗   |
++|               | RecorderManager.offError         | ✓       | ✗   | ✗       | ✗   |
++|               | RecorderManager.onInterruptionBegin | ✓    | ✗   | ✗       | ✗   |
++|               | RecorderManager.offInterruptionBegin | ✓    | ✗   | ✗       | ✗   |
++|               | RecorderManager.onInterruptionEnd | ✓       | ✗   | ✗       | ✗   |
++|               | RecorderManager.offInterruptionEnd | ✓      | ✗   | ✗       | ✗   |
+ | 开放接口 - 授权 | getSetting                     | ✓       | ✓   | ✓       | ✓   |
+ |               | openSetting                      | ✓       | ✓   | ✓       | ✗   |
+ |               | authorize                        | ✓       | ✓   | ✓       | ✓   |
+@@ -435,6 +480,7 @@ DMPApp.init(context, { virtualFilePrefix: 'host-file://' })
+ - Web 的 `authorize` 当前支持浏览器可请求的相机、麦克风和定位 scope；浏览器无法打开系统应用权限页，因此 `openSetting` 明确不支持。Web 的 `chooseVideo` 返回会话期 `blob:` 临时路径；视频相册写入和编码压缩没有浏览器等价系统能力，`saveVideoToPhotosAlbum`、`compressVideo` 明确不支持。
+ - `compressVideo` 的精细编码参数受平台编码器能力约束：Android 和 HarmonyOS 会请求目标码率/分辨率，iOS 依据 `quality`/`resolution` 选择系统导出预设；编码器可能降级参数，但不会用原文件复制冒充压缩结果。
+ - `createVideoDecoder` 提供后台逐帧解码、同步 RGBA 取帧、异步控制和 `start` / `stop` / `seek` / `ended` 事件；编码格式受系统解码器限制，三端真机播放仍需验收；Web 需安全上下文、OffscreenCanvas 和 WebCodecs，并在 start 时检查 MP4 编码支持。`bufferchange` 和音轨暂不支持。接入与 libpag 的 Wasm 能力边界见[视频解码说明](./VideoDecoder.md)。
++- 音频接口本轮 service 层已提供 `createInnerAudioContext` / `getRecorderManager` 入口，原生侧目前仅 Android 落地（`InnerAudio.*` / `Recorder.*` wire 通道），iOS / Harmony / Web 待后续轮接入；`RecorderManager` 仅支持 aac / wav 两种格式，`onFrameRecorded` 暂未接入。
+ - 全局 `WXWebAssembly` 提供 libpag 4.5.85 所需的真实 Wasm 执行，包含同步 imports / exports、线性内存扩容、Table 取函数及包内 Brotli 加载；通过 `wx.canIUse('WXWebAssembly')` 检查。iOS 需要系统 JavaScriptCore 支持 ArrayBuffer 分离（iOS 17.4+）。它不属于 `wx` 对象上的方法，支持范围和接入方式见 [WXWebAssembly](./WXWebAssembly.md)。
+ - `getUpdateManager` 只负责更新状态通知和重启入口，包下载、校验和动态下发流程请参考[小程序包更新说明](./MiniProgram-Update.md)。
+ - `chooseMessageFile` 在 Android、iOS 和 HarmonyOS 上使用系统文件选择器。宿主无法访问微信会话记录，因此 `time` 返回文件修改时间（取不到时为选择时间），不是微信会话发送时间；选中文件会先复制到当前小程序的临时沙箱并返回 `difile://` 路径。
+diff --git a/fe/packages/compiler/src/common/compatibility-reference.js b/fe/packages/compiler/src/common/compatibility-reference.js
+index ea9cc0e..b4ac18d 100644
+--- a/fe/packages/compiler/src/common/compatibility-reference.js
++++ b/fe/packages/compiler/src/common/compatibility-reference.js
+@@ -231,6 +231,51 @@ const supportedWxApis = [
+ 	"VideoDecoder.getFrameData",
+ 	"VideoDecoder.on",
+ 	"VideoDecoder.off",
++	"createInnerAudioContext",
++	"InnerAudioContext.play",
++	"InnerAudioContext.pause",
++	"InnerAudioContext.stop",
++	"InnerAudioContext.seek",
++	"InnerAudioContext.destroy",
++	"InnerAudioContext.onCanplay",
++	"InnerAudioContext.offCanplay",
++	"InnerAudioContext.onPlay",
++	"InnerAudioContext.offPlay",
++	"InnerAudioContext.onPause",
++	"InnerAudioContext.offPause",
++	"InnerAudioContext.onStop",
++	"InnerAudioContext.offStop",
++	"InnerAudioContext.onEnded",
++	"InnerAudioContext.offEnded",
++	"InnerAudioContext.onTimeUpdate",
++	"InnerAudioContext.offTimeUpdate",
++	"InnerAudioContext.onError",
++	"InnerAudioContext.offError",
++	"InnerAudioContext.onWaiting",
++	"InnerAudioContext.offWaiting",
++	"InnerAudioContext.onSeeking",
++	"InnerAudioContext.offSeeking",
++	"InnerAudioContext.onSeeked",
++	"InnerAudioContext.offSeeked",
++	"InnerAudioContext.onLoadedmetadata",
++	"InnerAudioContext.offLoadedmetadata",
++	"getRecorderManager",
++	"RecorderManager.start",
++	"RecorderManager.pause",
++	"RecorderManager.resume",
++	"RecorderManager.stop",
++	"RecorderManager.onStart",
++	"RecorderManager.offStart",
++	"RecorderManager.onPause",
++	"RecorderManager.offPause",
++	"RecorderManager.onStop",
++	"RecorderManager.offStop",
++	"RecorderManager.onError",
++	"RecorderManager.offError",
++	"RecorderManager.onInterruptionBegin",
++	"RecorderManager.offInterruptionBegin",
++	"RecorderManager.onInterruptionEnd",
++	"RecorderManager.offInterruptionEnd",
+ 	"getSetting",
+ 	"openSetting",
+ 	"authorize",
+diff --git a/fe/packages/service/__tests__/audio-wx-namespace.spec.js b/fe/packages/service/__tests__/audio-wx-namespace.spec.js
+new file mode 100644
+index 0000000..414bfeb
+--- /dev/null
++++ b/fe/packages/service/__tests__/audio-wx-namespace.spec.js
+@@ -0,0 +1,83 @@
++/**
++ * 音频接口的 wx 命名空间契约（src/api/index.js）：
++ *   - native 注册表会出现 InnerAudio.* / Recorder.* 的 dotted wire 名，但微信公开
++ *     API 只有 createInnerAudioContext / getRecorderManager 两个入口，wire 名必须
++ *     被 blockedPublicApiNames 拦下，不能以非微信 API 形态挂到 wx 上。
++ *   - 两个入口本身是 core 目录各 media 模块的真实实现，经 import.meta.glob 自动
++ *     挂载，必须保持可枚举（供 Object.keys(wx) 建表的框架识别）。
++ */
++import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
++
++vi.mock('@/api/common', () => ({
++	invokeAPI: vi.fn(() => 'mocked-result'),
++	invokeAPIWithoutPromise: vi.fn(() => 'mocked-result'),
++}))
++
++vi.mock('@dimina/common', () => ({
++	callback: { store: vi.fn(fn => fn) },
++	isFunction: vi.fn(v => typeof v === 'function'),
++	isWebWorker: false,
++	parsePath: vi.fn(p => p),
++	suffixPixel: vi.fn(v => v),
++	uuid: vi.fn(() => 'test-uuid'),
++	modDefine: vi.fn(),
++	modRequire: vi.fn(),
++}))
++
++import globalApi, { registerEnumerableApiNames } from '../src/api/index.js'
++
++// 与契约「线协议速查」及 native AudioApi/RecorderApi 的 apiNames 一一对应。
++const AUDIO_WIRE_NAMES = [
++	'InnerAudio.setSrc',
++	'InnerAudio.play',
++	'InnerAudio.pause',
++	'InnerAudio.stop',
++	'InnerAudio.seek',
++	'InnerAudio.setProperty',
++	'InnerAudio.getState',
++	'InnerAudio.on',
++	'InnerAudio.off',
++	'InnerAudio.destroy',
++	'Recorder.start',
++	'Recorder.pause',
++	'Recorder.resume',
++	'Recorder.stop',
++	'Recorder.onStart',
++	'Recorder.onPause',
++	'Recorder.onStop',
++	'Recorder.onError',
++	'Recorder.onInterruptionBegin',
++	'Recorder.onInterruptionEnd',
++	'Recorder.offStart',
++	'Recorder.offPause',
++	'Recorder.offStop',
++	'Recorder.offError',
++	'Recorder.offInterruptionBegin',
++	'Recorder.offInterruptionEnd',
++]
++
++beforeAll(() => {
++	// 模拟 native 注册表把 wire 名原样送进登记入口。
++	registerEnumerableApiNames([...AUDIO_WIRE_NAMES])
++})
++
++afterAll(() => {
++	vi.restoreAllMocks()
++})
++
++describe('音频 wire 名的 wx 命名空间契约', () => {
++	it('native 注册表里的 InnerAudio.*/Recorder.* wire 名不能挂到 wx 上', () => {
++		for (const name of AUDIO_WIRE_NAMES) {
++			expect(globalApi[name]).toBeUndefined()
++			expect(name in globalApi).toBe(false)
++			expect(Object.keys(globalApi)).not.toContain(name)
++		}
++	})
++
++	it('createInnerAudioContext/getRecorderManager 作为 core 实现保持可枚举', () => {
++		expect(typeof globalApi.createInnerAudioContext).toBe('function')
++		expect(typeof globalApi.getRecorderManager).toBe('function')
++		expect(Object.keys(globalApi)).toContain('createInnerAudioContext')
++		expect(Object.keys(globalApi)).toContain('getRecorderManager')
++	})
++})
+diff --git a/fe/packages/service/__tests__/audio.spec.js b/fe/packages/service/__tests__/audio.spec.js
+new file mode 100644
+index 0000000..6012f02
+--- /dev/null
++++ b/fe/packages/service/__tests__/audio.spec.js
+@@ -0,0 +1,476 @@
++import { beforeEach, describe, expect, it, vi } from 'vitest'
++
++vi.mock('@/api/common', () => ({
++	invokeAPI: vi.fn(),
++	invokeAPIWithoutPromise: vi.fn(),
++}))
++
++import { callback } from '@dimina/common'
++import { invokeAPI } from '@/api/common'
++import { createInnerAudioContext, getRecorderManager } from '../src/api/core/media/audio/index.js'
++
++// 契约（dimina-audio-contract.md 线协议速查）固定的 11 个事件，
++// wire 上 event 字段取去 on 前缀的驼峰事件名。
++const INNER_AUDIO_EVENT_NAMES = [
++	['onCanplay', 'canplay'],
++	['onPlay', 'play'],
++	['onPause', 'pause'],
++	['onStop', 'stop'],
++	['onEnded', 'ended'],
++	['onTimeUpdate', 'timeUpdate'],
++	['onError', 'error'],
++	['onWaiting', 'waiting'],
++	['onSeeking', 'seeking'],
++	['onSeeked', 'seeked'],
++	['onLoadedmetadata', 'loadedmetadata'],
++]
++
++const RECORDER_EVENTS = [
++	'onStart',
++	'onPause',
++	'onStop',
++	'onError',
++	'onInterruptionBegin',
++	'onInterruptionEnd',
++]
++
++function lastCall() {
++	return invokeAPI.mock.calls[invokeAPI.mock.calls.length - 1]
++}
++
++describe('InnerAudioContext', () => {
++	beforeEach(() => {
++		vi.mocked(invokeAPI).mockReset()
++		callback.remove()
++	})
++
++	it('creates instances with WeChat defaults and a prefixed instanceId', () => {
++		const ctx = createInnerAudioContext()
++		expect(ctx.instanceId).toMatch(/^inner_audio_/)
++		expect(ctx.src).toBe('')
++		expect(ctx.startTime).toBe(0)
++		expect(ctx.autoplay).toBe(false)
++		expect(ctx.loop).toBe(false)
++		expect(ctx.obeyMuteSwitch).toBe(true)
++		expect(ctx.volume).toBe(1)
++		expect(ctx.playbackRate).toBe(1)
++		expect(ctx.paused).toBe(true)
++		expect(ctx.duration).toBe(0)
++		expect(ctx.currentTime).toBe(0)
++	})
++
++	it('forwards src assignment to InnerAudio.setSrc with stored callback ids, not promises', () => {
++		const ctx = createInnerAudioContext()
++		ctx.src = 'https://example.com/audio.mp3'
++
++		expect(invokeAPI).toHaveBeenCalledTimes(1)
++		const [name, params, target, allowPromise] = lastCall()
++		expect(name).toBe('InnerAudio.setSrc')
++		expect(params.instanceId).toBe(ctx.instanceId)
++		expect(params.src).toBe('https://example.com/audio.mp3')
++		expect(typeof params.success).toBe('string')
++		expect(typeof params.fail).toBe('string')
++		expect(target).toBe('container')
++		expect(allowPromise).toBe(false)
++		expect(ctx.src).toBe('https://example.com/audio.mp3')
++	})
++
++	it.each([
++		['volume', 0.5],
++		['loop', true],
++		['playbackRate', 1.5],
++		['startTime', 12.5],
++		['autoplay', true],
++		['obeyMuteSwitch', false],
++	])('passes the %s assignment through to InnerAudio.setProperty', (key, value) => {
++		const ctx = createInnerAudioContext()
++		ctx[key] = value
++
++		const [name, params] = lastCall()
++		expect(name).toBe('InnerAudio.setProperty')
++		expect(params.instanceId).toBe(ctx.instanceId)
++		expect(params[key]).toBe(value)
++		expect(ctx[key]).toBe(value)
++	})
++
++	it.each([
++		['play', 'InnerAudio.play'],
++		['pause', 'InnerAudio.pause'],
++		['stop', 'InnerAudio.stop'],
++	])('forwards %s over the dotted wire name', (method, wire) => {
++		const ctx = createInnerAudioContext()
++		ctx[method]()
++
++		const [name, params] = lastCall()
++		expect(name).toBe(wire)
++		expect(params.instanceId).toBe(ctx.instanceId)
++	})
++
++	it('forwards seek with a position in seconds and ignores invalid positions', () => {
++		const ctx = createInnerAudioContext()
++		ctx.seek(30.5)
++
++		let [name, params] = lastCall()
++		expect(name).toBe('InnerAudio.seek')
++		expect(params.instanceId).toBe(ctx.instanceId)
++		expect(params.position).toBe(30.5)
++
++		const callsBefore = invokeAPI.mock.calls.length
++		ctx.seek(-1)
++		ctx.seek(Number.NaN)
++		ctx.seek('10')
++		expect(invokeAPI.mock.calls.length).toBe(callsBefore)
++	})
++
++	it('updates the paused cache from control receipts', () => {
++		const ctx = createInnerAudioContext()
++
++		ctx.play()
++		callback.invoke(lastCall()[1].success, { errMsg: 'InnerAudio.play:ok' })
++		expect(ctx.paused).toBe(false)
++
++		ctx.pause()
++		callback.invoke(lastCall()[1].success, { errMsg: 'InnerAudio.pause:ok' })
++		expect(ctx.paused).toBe(true)
++
++		ctx.play()
++		callback.invoke(lastCall()[1].success, { errMsg: 'InnerAudio.play:ok' })
++		ctx.stop()
++		callback.invoke(lastCall()[1].success, { errMsg: 'InnerAudio.stop:ok' })
++		expect(ctx.paused).toBe(true)
++	})
++
++	it('reads duration/currentTime/paused from the getState sync result and caches the last values', () => {
++		const ctx = createInnerAudioContext()
++		vi.mocked(invokeAPI).mockReturnValueOnce({ duration: 180, currentTime: 42.5, paused: false })
++
++		expect(ctx.duration).toBe(180)
++		const [name, params, target, allowPromise] = invokeAPI.mock.calls[0]
++		expect(name).toBe('InnerAudio.getState')
++		expect(params.instanceId).toBe(ctx.instanceId)
++		expect(target).toBe('container')
++		expect(allowPromise).toBe(false)
++
++		// 桥读不到同步结果时回落到上次缓存，而不是清零。
++		expect(ctx.currentTime).toBe(42.5)
++		expect(ctx.paused).toBe(false)
++		expect(ctx.duration).toBe(180)
++	})
++
++	it.each(INNER_AUDIO_EVENT_NAMES)(
++		'registers %s as InnerAudio.on with event "%s" and delivers payloads through the callback id',
++		(method, event) => {
++			const ctx = createInnerAudioContext()
++			const listener = vi.fn()
++			ctx[method](listener)
++
++			const [name, params] = lastCall()
++			expect(name).toBe('InnerAudio.on')
++			expect(params.instanceId).toBe(ctx.instanceId)
++			expect(params.event).toBe(event)
++			expect(typeof params.success).toBe('string')
++
++			callback.invoke(params.success, { marker: event })
++			expect(listener).toHaveBeenCalledTimes(1)
++			expect(listener).toHaveBeenCalledWith({ marker: event })
++
++			ctx[`off${method.slice(2)}`](listener)
++			const [offName, offParams] = lastCall()
++			expect(offName).toBe('InnerAudio.off')
++			expect(offParams.event).toBe(event)
++			expect(offParams.success).toBe(params.success)
++
++			callback.invoke(params.success, { marker: event })
++			expect(listener).toHaveBeenCalledTimes(1)
++		},
++	)
++
++	it('delivers an event to every registered listener with one wire registration each', () => {
++		const ctx = createInnerAudioContext()
++		const first = vi.fn()
++		const second = vi.fn()
++		ctx.onPlay(first)
++		ctx.onPlay(second)
++
++		const onCalls = invokeAPI.mock.calls.filter(([name]) => name === 'InnerAudio.on')
++		expect(onCalls).toHaveLength(2)
++		for (const [, params] of onCalls) callback.invoke(params.success, {})
++		expect(first).toHaveBeenCalledTimes(1)
++		expect(second).toHaveBeenCalledTimes(1)
++
++		ctx.offPlay(first)
++		for (const [, params] of invokeAPI.mock.calls.filter(([name]) => name === 'InnerAudio.on')) {
++			callback.invoke(params.success, {})
++		}
++		expect(first).toHaveBeenCalledTimes(1)
++		expect(second).toHaveBeenCalledTimes(2)
++	})
++
++	it('offXxx() removes the whole event, drops the success id from the wire, and purges callbacks', () => {
++		const ctx = createInnerAudioContext()
++		const first = vi.fn()
++		const second = vi.fn()
++		ctx.onPlay(first)
++		ctx.onPlay(second)
++		const ids = invokeAPI.mock.calls
++			.filter(([name]) => name === 'InnerAudio.on')
++			.map(([, params]) => params.success)
++
++		ctx.offPlay()
++		const [offName, offParams] = lastCall()
++		expect(offName).toBe('InnerAudio.off')
++		expect(offParams).toEqual({ instanceId: ctx.instanceId, event: 'play' })
++		for (const id of ids) callback.invoke(id, {})
++		expect(first).not.toHaveBeenCalled()
++		expect(second).not.toHaveBeenCalled()
++	})
++
++	it('lets the same callback listen on two events over one callback id; offing one keeps the other alive', () => {
++		const ctx = createInnerAudioContext()
++		const listener = vi.fn()
++		ctx.onPlay(listener)
++		ctx.onTimeUpdate(listener)
++
++		const onCalls = invokeAPI.mock.calls.filter(([name]) => name === 'InnerAudio.on')
++		expect(onCalls).toHaveLength(2)
++		expect(onCalls[0][1].success).toBe(onCalls[1][1].success)
++		const sharedId = onCalls[0][1].success
++
++		ctx.offPlay(listener)
++		callback.invoke(sharedId, { currentTime: 1 })
++		expect(listener).toHaveBeenCalledWith({ currentTime: 1 })
++
++		ctx.offTimeUpdate(listener)
++		callback.invoke(sharedId, { currentTime: 2 })
++		expect(listener).toHaveBeenCalledTimes(1)
++	})
++
++	it('lets two instances share one listener id; offing one instance keeps the other alive', () => {
++		const first = createInnerAudioContext()
++		const second = createInnerAudioContext()
++		const listener = vi.fn()
++		first.onPlay(listener)
++		second.onPlay(listener)
++
++		const onCalls = invokeAPI.mock.calls.filter(([name]) => name === 'InnerAudio.on')
++		expect(onCalls).toHaveLength(2)
++		expect(onCalls[0][1].success).toBe(onCalls[1][1].success)
++		const sharedId = onCalls[0][1].success
++
++		first.offPlay(listener)
++		callback.invoke(sharedId, {})
++		expect(listener).toHaveBeenCalledTimes(1)
++
++		second.offPlay(listener)
++		callback.invoke(sharedId, {})
++		expect(listener).toHaveBeenCalledTimes(1)
++	})
++
++	it('registering the same listener twice on one event sends the wire registration once', () => {
++		const ctx = createInnerAudioContext()
++		const listener = vi.fn()
++		ctx.onPlay(listener)
++		ctx.onPlay(listener)
++
++		const onCalls = invokeAPI.mock.calls.filter(([name]) => name === 'InnerAudio.on')
++		expect(onCalls).toHaveLength(1)
++
++		const [, params] = onCalls[0]
++		callback.invoke(params.success, {})
++		expect(listener).toHaveBeenCalledTimes(1)
++	})
++
++	it('does not send wire when offing a callback that was never registered', () => {
++		const ctx = createInnerAudioContext()
++		ctx.offPlay(vi.fn())
++		expect(invokeAPI).not.toHaveBeenCalled()
++	})
++
++	it('still forwards a full-clear InnerAudio.off when nothing was registered', () => {
++		const ctx = createInnerAudioContext()
++		ctx.offPlay()
++		const [name, params] = lastCall()
++		expect(name).toBe('InnerAudio.off')
++		expect(params).toEqual({ instanceId: ctx.instanceId, event: 'play' })
++	})
++
++	it('destroy sends the wire once, then every method becomes a silent no-op', () => {
++		const ctx = createInnerAudioContext()
++		const listener = vi.fn()
++		ctx.onPlay(listener)
++		const onCall = invokeAPI.mock.calls.find(([name]) => name === 'InnerAudio.on')
++
++		ctx.destroy()
++		const destroyCall = invokeAPI.mock.calls.find(([name]) => name === 'InnerAudio.destroy')
++		expect(destroyCall?.[1]).toMatchObject({ instanceId: ctx.instanceId })
++		expect(typeof destroyCall?.[1].success).toBe('string')
++		expect(typeof destroyCall?.[1].fail).toBe('string')
++
++		invokeAPI.mockClear()
++		ctx.play()
++		ctx.pause()
++		ctx.stop()
++		ctx.seek(1)
++		ctx.src = 'https://example.com/next.mp3'
++		ctx.startTime = 5
++		ctx.onPlay(vi.fn())
++		ctx.offPlay()
++		ctx.destroy()
++		expect(ctx.paused).toBe(true)
++		expect(invokeAPI).not.toHaveBeenCalled()
++
++		// 销毁时已摘除回调表，原生即使晚到的事件也唤不回监听。
++		callback.invoke(onCall[1].success, {})
++		expect(listener).not.toHaveBeenCalled()
++	})
++})
++
++describe('RecorderManager', () => {
++	beforeEach(() => {
++		vi.mocked(invokeAPI).mockReset()
++		callback.remove()
++	})
++
++	it('returns the same singleton across calls', () => {
++		expect(getRecorderManager()).toBe(getRecorderManager())
++	})
++
++	it('starts with WeChat defaults and paired settler ids', () => {
++		getRecorderManager().start()
++
++		const [name, params, target, allowPromise] = lastCall()
++		expect(name).toBe('Recorder.start')
++		expect(params.duration).toBe(60000)
++		expect(params.format).toBe('aac')
++		expect(typeof params.success).toBe('string')
++		expect(typeof params.fail).toBe('string')
++		expect(target).toBe('container')
++		expect(allowPromise).toBe(false)
++	})
++
++	it('forwards custom recording options', () => {
++		getRecorderManager().start({
++			duration: 5000,
++			sampleRate: 44100,
++			numberOfChannels: 2,
++			encodeBitRate: 192000,
++			format: 'wav',
++		})
++
++		const [name, params] = lastCall()
++		expect(name).toBe('Recorder.start')
++		expect(params).toEqual({
++			duration: 5000,
++			sampleRate: 44100,
++			numberOfChannels: 2,
++			encodeBitRate: 192000,
++			format: 'wav',
++			success: expect.any(String),
++			fail: expect.any(String),
++		})
++	})
++
++	it('clamps duration to the 600000ms ceiling and falls back to the default on garbage', () => {
++		const mgr = getRecorderManager()
++		mgr.start({ duration: 999999 })
++		expect(lastCall()[1].duration).toBe(600000)
++
++		mgr.start({ duration: 'oops' })
++		expect(lastCall()[1].duration).toBe(60000)
++	})
++
++	it('rejects unsupported formats through onError without touching the bridge', () => {
++		const mgr = getRecorderManager()
++		const onError = vi.fn()
++		mgr.onError(onError)
++		const callsAfterSubscribe = invokeAPI.mock.calls.length
++
++		mgr.start({ format: 'mp3' })
++
++		expect(invokeAPI.mock.calls.length).toBe(callsAfterSubscribe)
++		expect(onError).toHaveBeenCalledTimes(1)
++		expect(onError.mock.calls[0][0].errMsg).toContain('Recorder.start:fail invalid format')
++	})
++
++	it('routes native start failures to the onError listeners', () => {
++		const mgr = getRecorderManager()
++		const onError = vi.fn()
++		mgr.onError(onError)
++
++		mgr.start({ format: 'aac' })
++		const startCall = invokeAPI.mock.calls.find(([name]) => name === 'Recorder.start')
++		callback.invoke(startCall[1].fail, { errMsg: 'Recorder.start:fail auth deny' })
++
++		expect(onError).toHaveBeenCalledTimes(1)
++		expect(onError).toHaveBeenCalledWith({ errMsg: 'Recorder.start:fail auth deny' })
++	})
++
++	it.each([
++		['pause', 'Recorder.pause'],
++		['resume', 'Recorder.resume'],
++		['stop', 'Recorder.stop'],
++	])('forwards %s over the dotted wire name', (method, wire) => {
++		getRecorderManager()[method]()
++
++		const [name, params] = lastCall()
++		expect(name).toBe(wire)
++		expect(typeof params.success).toBe('string')
++		expect(typeof params.fail).toBe('string')
++	})
++
++	it.each(
++		RECORDER_EVENTS.map((method) => [method, `Recorder.${method}`, `off${method.slice(2)}`, `Recorder.off${method.slice(2)}`]),
++	)(
++		'registers %s over %s and removes it over %s',
++		(method, onWire, offMethod, offWire) => {
++			const mgr = getRecorderManager()
++			const listener = vi.fn()
++			mgr[method](listener)
++
++			const [name, params] = lastCall()
++			expect(name).toBe(onWire)
++			expect(typeof params.success).toBe('string')
++
++			callback.invoke(params.success, { via: method })
++			expect(listener).toHaveBeenCalledWith({ via: method })
++
++			mgr[offMethod](listener)
++			const [offName, offParams] = lastCall()
++			expect(offName).toBe(offWire)
++			expect(offParams.success).toBe(params.success)
++
++			callback.invoke(params.success, { via: method })
++			expect(listener).toHaveBeenCalledTimes(1)
++		},
++	)
++
++	it('delivers the onStop recording result payload unchanged', () => {
++		const mgr = getRecorderManager()
++		const onStop = vi.fn()
++		mgr.onStop(onStop)
++
++		const [, params] = lastCall()
++		callback.invoke(params.success, { tempFilePath: 'difile://tmp/rec.aac', duration: 60000, fileSize: 960000 })
++
++		expect(onStop).toHaveBeenCalledWith({ tempFilePath: 'difile://tmp/rec.aac', duration: 60000, fileSize: 960000 })
++	})
++
++	it('offXxx() drops the success id from the wire and clears every listener of the event', () => {
++		const mgr = getRecorderManager()
++		const first = vi.fn()
++		const second = vi.fn()
++		mgr.onStart(first)
++		mgr.onStart(second)
++		const ids = invokeAPI.mock.calls
++			.filter(([name]) => name === 'Recorder.onStart')
++			.map(([, params]) => params.success)
++
++		mgr.offStart()
++		const [offName, offParams] = lastCall()
++		expect(offName).toBe('Recorder.offStart')
++		expect(offParams).toEqual({})
++		for (const id of ids) callback.invoke(id, {})
++		expect(first).not.toHaveBeenCalled()
++		expect(second).not.toHaveBeenCalled()
++	})
++})
+diff --git a/fe/packages/service/src/api/core/media/audio/index.js b/fe/packages/service/src/api/core/media/audio/index.js
+new file mode 100644
+index 0000000..8e9fe14
+--- /dev/null
++++ b/fe/packages/service/src/api/core/media/audio/index.js
+@@ -0,0 +1,474 @@
++import { callback, uuid } from '@dimina/common'
++import { invokeAPI } from '@/api/common'
++
++/**
++ * 创建并返回 InnerAudioContext 实例
++ * https://developers.weixin.qq.com/miniprogram/dev/api/media/audio/wx.createInnerAudioContext.html
++ *
++ * @param {boolean} [useWebAudioImplement] 仅保留微信签名；本实现统一走原生播放器
++ * @returns {InnerAudioContext} 音频播放上下文实例
++ */
++export function createInnerAudioContext(useWebAudioImplement = false) {
++	return new InnerAudioContext(useWebAudioImplement)
++}
++
++/**
++ * 获取全局唯一的录音管理器 RecorderManager
++ * https://developers.weixin.qq.com/miniprogram/dev/api/media/recorder/wx.getRecorderManager.html
++ *
++ * @returns {RecorderManager} 全局唯一的录音管理器
++ */
++let recorderManager
++export function getRecorderManager() {
++	if (!recorderManager) {
++		recorderManager = new RecorderManager()
++	}
++	return recorderManager
++}
++
++// InnerAudioContext 的 11 个事件，wire 上的 event 字段取微信事件名（去掉 on 前缀的驼峰）。
++const INNER_AUDIO_EVENTS = {
++	onCanplay: 'canplay',
++	onPlay: 'play',
++	onPause: 'pause',
++	onStop: 'stop',
++	onEnded: 'ended',
++	onTimeUpdate: 'timeUpdate',
++	onError: 'error',
++	onWaiting: 'waiting',
++	onSeeking: 'seeking',
++	onSeeked: 'seeked',
++	onLoadedmetadata: 'loadedmetadata',
++}
++
++// RecorderManager 支持的事件，wire 上每个事件是独立的 Recorder.onXxx / Recorder.offXxx。
++const RECORDER_EVENTS = [
++	'onStart',
++	'onPause',
++	'onStop',
++	'onError',
++	'onInterruptionBegin',
++	'onInterruptionEnd',
++]
++
++const DEFAULT_RECORD_DURATION = 60000
++const MAX_RECORD_DURATION = 600000
++
++/**
++ * 常驻事件 id 的引用计数。callback.store(cb, true) 对同一个回调函数全局只发一个 id，
++ * 同一个函数可能同时挂在多个事件、甚至多个 InnerAudioContext 实例上，所以摘表要
++ * 等所有引用都注销（计数归零）才能做，否则会误删别的订阅。
++ */
++const sharedIdRefs = new Map()
++
++function acquireId(id) {
++	sharedIdRefs.set(id, (sharedIdRefs.get(id) || 0) + 1)
++}
++
++function releaseId(id) {
++	const refs = (sharedIdRefs.get(id) || 0) - 1
++	if (refs > 0) {
++		sharedIdRefs.set(id, refs)
++	}
++	else {
++		sharedIdRefs.delete(id)
++		callback.remove(id)
++	}
++}
++
++/**
++ * 事件登记的公共机制：每个事件维护「callbackId -> 回调」表。登记用
++ * callback.store(cb, true)（keep）拿常驻 id——同一函数重复登记会拿到同一个
++ * id，所以同事件重复登记天然去重；注销按上面的引用计数回收 id。
++ */
++function addEventListener(ctx, event, cb, register) {
++	if (ctx.destroyed || typeof cb !== 'function') return
++	let listeners = ctx.events.get(event)
++	if (!listeners) ctx.events.set(event, listeners = new Map())
++	const id = callback.store(cb, true)
++	const isNew = !listeners.has(id)
++	listeners.set(id, cb)
++	// 引用计数与事件表条目一一对应：条目建一次计数加一，删一次减一。
++	if (isNew) {
++		acquireId(id)
++		register(id)
++	}
++}
++
++function removeEventListener(ctx, event, cb, unregister) {
++	if (ctx.destroyed) return
++	const listeners = ctx.events.get(event)
++	if (!listeners) {
++		// 本地没登记过也允许无参注销到达原生，清掉原生侧可能残留的事件表。
++		if (cb === undefined) unregister(undefined)
++		return
++	}
++	if (cb === undefined) {
++		ctx.events.delete(event)
++		for (const id of listeners.keys()) releaseId(id)
++		unregister(undefined)
++		return
++	}
++	for (const [id, listener] of listeners) {
++		if (listener === cb) {
++			listeners.delete(id)
++			releaseId(id)
++			unregister(id)
++			return
++		}
++	}
++}
++
++function emitEvent(ctx, event, payload) {
++	const listeners = ctx.events.get(event)
++	if (!listeners) return
++	for (const listener of [...listeners.values()]) listener(payload)
++}
++
++/**
++ * 微信音频实例的通用事件 wiring：控制/属性调用带一次性的成对回执 id（本模块显式
++ * callback.store 成对登记，任一回执先到即两条同清），事件订阅走常驻 id。
++ */
++class InnerAudioContext {
++	/**
++	 * InnerAudioContext
++	 * https://developers.weixin.qq.com/miniprogram/dev/api/media/audio/InnerAudioContext.html
++	 */
++	constructor(useWebAudioImplement = false) {
++		// useWebAudioImplement 只保留微信签名；原生统一走 MediaPlayer。
++		this.useWebAudioImplement = useWebAudioImplement
++		this.instanceId = `inner_audio_${uuid()}`
++		this.events = new Map()
++		this.destroyed = false
++		this._src = ''
++		this._startTime = 0
++		this._autoplay = false
++		this._loop = false
++		// Android 没有硬件静音开关，obeyMuteSwitch 仅按微信默认值透传，由原生记录。
++		this._obeyMuteSwitch = true
++		this._volume = 1
++		this._playbackRate = 1
++		this._state = { duration: 0, currentTime: 0, paused: true }
++	}
++
++	get src() {
++		return this._src
++	}
++
++	set src(value) {
++		this._src = value
++		if (this.destroyed) return
++		this.control('InnerAudio.setSrc', { src: value }, () => {
++			// 重新加载后回到未播放态；duration/currentTime 等 loadedmetadata 后由原生刷新。
++			this._state = { duration: 0, currentTime: 0, paused: true }
++		})
++	}
++
++	get startTime() {
++		return this._startTime
++	}
++
++	set startTime(value) {
++		this._startTime = value
++		if (this.destroyed) return
++		this.control('InnerAudio.setProperty', { startTime: value })
++	}
++
++	get autoplay() {
++		return this._autoplay
++	}
++
++	set autoplay(value) {
++		this._autoplay = value
++		if (this.destroyed) return
++		this.control('InnerAudio.setProperty', { autoplay: value })
++	}
++
++	get loop() {
++		return this._loop
++	}
++
++	set loop(value) {
++		this._loop = value
++		if (this.destroyed) return
++		this.control('InnerAudio.setProperty', { loop: value })
++	}
++
++	get obeyMuteSwitch() {
++		return this._obeyMuteSwitch
++	}
++
++	set obeyMuteSwitch(value) {
++		this._obeyMuteSwitch = value
++		if (this.destroyed) return
++		this.control('InnerAudio.setProperty', { obeyMuteSwitch: value })
++	}
++
++	get volume() {
++		return this._volume
++	}
++
++	set volume(value) {
++		this._volume = value
++		if (this.destroyed) return
++		this.control('InnerAudio.setProperty', { volume: value })
++	}
++
++	get playbackRate() {
++		return this._playbackRate
++	}
++
++	set playbackRate(value) {
++		this._playbackRate = value
++		if (this.destroyed) return
++		this.control('InnerAudio.setProperty', { playbackRate: value })
++	}
++
++	// 以下三个是原生播放器的实时值：读取时走 InnerAudio.getState 的同步回执并缓存，
++	// 桥读不到结果（如 Web 调试通道异步）时回落到上次缓存值。
++	get duration() {
++		return this.syncState().duration
++	}
++
++	get currentTime() {
++		return this.syncState().currentTime
++	}
++
++	get paused() {
++		return this.syncState().paused
++	}
++
++	syncState() {
++		if (!this.destroyed) {
++			const result = invokeAPI('InnerAudio.getState', { instanceId: this.instanceId }, 'container', false)
++			if (result && typeof result === 'object') {
++				const { duration, currentTime, paused } = result
++				if (typeof duration === 'number') this._state.duration = duration
++				if (typeof currentTime === 'number') this._state.currentTime = currentTime
++				if (typeof paused === 'boolean') this._state.paused = paused
++			}
++		}
++		return this._state
++	}
++
++	/**
++	 * 播放
++	 * https://developers.weixin.qq.com/miniprogram/dev/api/media/audio/InnerAudioContext.play.html
++	 */
++	play() {
++		if (this.destroyed) return
++		this.control('InnerAudio.play', {}, () => {
++			this._state.paused = false
++		})
++	}
++
++	/**
++	 * 暂停
++	 * https://developers.weixin.qq.com/miniprogram/dev/api/media/audio/InnerAudioContext.pause.html
++	 */
++	pause() {
++		if (this.destroyed) return
++		this.control('InnerAudio.pause', {}, () => {
++			this._state.paused = true
++		})
++	}
++
++	/**
++	 * 停止
++	 * https://developers.weixin.qq.com/miniprogram/dev/api/media/audio/InnerAudioContext.stop.html
++	 */
++	stop() {
++		if (this.destroyed) return
++		this.control('InnerAudio.stop', {}, () => {
++			this._state.paused = true
++		})
++	}
++
++	/**
++	 * 跳转到指定位置（单位秒）
++	 * https://developers.weixin.qq.com/miniprogram/dev/api/media/audio/InnerAudioContext.seek.html
++	 */
++	seek(position) {
++		if (this.destroyed) return
++		if (typeof position !== 'number' || !Number.isFinite(position) || position < 0) return
++		this.control('InnerAudio.seek', { position })
++	}
++
++	/**
++	 * 销毁实例。销毁后所有方法均为 no-op（不再下发 wire、不抛错），事件表清空。
++	 * https://developers.weixin.qq.com/miniprogram/dev/api/media/audio/InnerAudioContext.destroy.html
++	 */
++	destroy() {
++		if (this.destroyed) return
++		this.destroyed = true
++		for (const listeners of this.events.values()) {
++			for (const id of listeners.keys()) releaseId(id)
++		}
++		this.events.clear()
++		this._state.paused = true
++		this.control('InnerAudio.destroy', {})
++	}
++
++	control(name, params, onSuccess) {
++		// 按契约直接传 callback.store() 的一次性字符串 id，不走 Promise 化；成对登记，
++		// 任一条回执先到就把两条都摘掉，避免另一条永久留在回调表里。
++		const payload = { ...params, instanceId: this.instanceId }
++		let successId
++		let failId
++		const settle = () => {
++			callback.remove(successId)
++			callback.remove(failId)
++		}
++		successId = callback.store(() => {
++			settle()
++			if (onSuccess) onSuccess()
++		})
++		failId = callback.store(() => {
++			// 失败详情由原生按契约另路推 error 事件，这里只消费本次调用的回执并清账，
++			// 不做二次分发，避免与 onError 监听重复触发。
++			settle()
++		})
++		payload.success = successId
++		payload.fail = failId
++		invokeAPI(name, payload, 'container', false)
++	}
++
++	registerEvent(event, id) {
++		invokeAPI('InnerAudio.on', { instanceId: this.instanceId, event, success: id }, 'container', false)
++	}
++
++	unregisterEvent(event, id) {
++		const params = { instanceId: this.instanceId, event }
++		if (id !== undefined) params.success = id
++		invokeAPI('InnerAudio.off', params, 'container', false)
++	}
++}
++
++for (const [method, event] of Object.entries(INNER_AUDIO_EVENTS)) {
++	InnerAudioContext.prototype[method] = function onInnerAudioEvent(cb) {
++		addEventListener(this, event, cb, (id) => this.registerEvent(event, id))
++	}
++	InnerAudioContext.prototype[`off${method.slice(2)}`] = function offInnerAudioEvent(cb) {
++		removeEventListener(this, event, cb, (id) => this.unregisterEvent(event, id))
++	}
++}
++
++/**
++ * 微信音频实例的录音端：单例 per 小程序，事件为独立 wire 名
++ * （Recorder.onStart / Recorder.offStart ...），不带 event 字段。
++ */
++class RecorderManager {
++	/**
++	 * RecorderManager
++	 * https://developers.weixin.qq.com/miniprogram/dev/api/media/recorder/RecorderManager.html
++	 */
++	constructor() {
++		this.events = new Map()
++	}
++
++	/**
++	 * 开始录音。format 仅支持 aac / wav，其余取值按微信语义走 onError 失败，不下发原生。
++	 * https://developers.weixin.qq.com/miniprogram/dev/api/media/recorder/RecorderManager.start.html
++	 */
++	start(options = {}) {
++		const {
++			duration = DEFAULT_RECORD_DURATION,
++			sampleRate,
++			numberOfChannels,
++			encodeBitRate,
++			format = 'aac',
++		} = options || {}
++		if (format !== 'aac' && format !== 'wav') {
++			// 微信语义：不支持的格式走 onError 失败，不下发原生。
++			emitEvent(this, 'onError', { errMsg: 'Recorder.start:fail invalid format' })
++			return
++		}
++		const params = { duration: normalizeRecordDuration(duration), format }
++		if (sampleRate !== undefined) params.sampleRate = sampleRate
++		if (numberOfChannels !== undefined) params.numberOfChannels = numberOfChannels
++		if (encodeBitRate !== undefined) params.encodeBitRate = encodeBitRate
++		// start 的失败回执按契约由 invokeFail 送回 fail id，转发给 onError 监听；
++		// 成功侧只登记一个清理用空回调，哪条先到都能把两条回执清干净。
++		let successId
++		let failId
++		const settle = () => {
++			callback.remove(successId)
++			callback.remove(failId)
++		}
++		successId = callback.store(() => settle())
++		failId = callback.store((res) => {
++			settle()
++			emitEvent(this, 'onError', res)
++		})
++		invokeAPI('Recorder.start', {
++			...params,
++			success: successId,
++			fail: failId,
++		}, 'container', false)
++	}
++
++	/**
++	 * 暂停录音
++	 * https://developers.weixin.qq.com/miniprogram/dev/api/media/recorder/RecorderManager.pause.html
++	 */
++	pause() {
++		this.control('Recorder.pause')
++	}
++
++	/**
++	 * 继续录音
++	 * https://developers.weixin.qq.com/miniprogram/dev/api/media/recorder/RecorderManager.resume.html
++	 */
++	resume() {
++		this.control('Recorder.resume')
++	}
++
++	/**
++	 * 停止录音，成功后 onStop 事件带回 {tempFilePath, duration, fileSize}
++	 * https://developers.weixin.qq.com/miniprogram/dev/api/media/recorder/RecorderManager.stop.html
++	 */
++	stop() {
++		this.control('Recorder.stop')
++	}
++
++	control(name) {
++		// 与 InnerAudioContext.control 同款的一次性成对回执 id，回执本身无业务语义，
++		// 只保证 native 的 invokeSuccess/invokeFail 都有真实 id 可送达并随手清账。
++		let successId
++		let failId
++		const settle = () => {
++			callback.remove(successId)
++			callback.remove(failId)
++		}
++		successId = callback.store(settle)
++		failId = callback.store(settle)
++		invokeAPI(name, {
++			success: successId,
++			fail: failId,
++		}, 'container', false)
++	}
++
++	registerEvent(method, id) {
++		invokeAPI(`Recorder.${method}`, { success: id }, 'container', false)
++	}
++
++	unregisterEvent(method, id) {
++		const params = id === undefined ? {} : { success: id }
++		invokeAPI(`Recorder.off${method.slice(2)}`, params, 'container', false)
++	}
++}
++
++for (const method of RECORDER_EVENTS) {
++	RecorderManager.prototype[method] = function onRecorderEvent(cb) {
++		addEventListener(this, method, cb, (id) => this.registerEvent(method, id))
++	}
++	RecorderManager.prototype[`off${method.slice(2)}`] = function offRecorderEvent(cb) {
++		removeEventListener(this, method, cb, (id) => this.unregisterEvent(method, id))
++	}
++}
++
++function normalizeRecordDuration(duration) {
++	const value = Number(duration)
++	if (!Number.isFinite(value) || value <= 0) return DEFAULT_RECORD_DURATION
++	return Math.min(value, MAX_RECORD_DURATION)
++}
+diff --git a/fe/packages/service/src/api/index.js b/fe/packages/service/src/api/index.js
+index f94ce77..b26e68b 100644
+--- a/fe/packages/service/src/api/index.js
++++ b/fe/packages/service/src/api/index.js
+@@ -15,6 +15,35 @@ const blockedPublicApiNames = new Set([
+ 	'onUnhandledRejection',
+ 	'onPageNotFound',
+ 	'onAppRoute',
++	// 音频通道的内部 wire 名（InnerAudioContext / RecorderManager 的控制桥与事件桥）。
++	// native 注册表会出现这些名字，但微信公开 API 只有 createInnerAudioContext /
++	// getRecorderManager 两个入口，wire 名不能以非微信 API 形态挂到 wx 上。
++	'InnerAudio.setSrc',
++	'InnerAudio.play',
++	'InnerAudio.pause',
++	'InnerAudio.stop',
++	'InnerAudio.seek',
++	'InnerAudio.setProperty',
++	'InnerAudio.getState',
++	'InnerAudio.on',
++	'InnerAudio.off',
++	'InnerAudio.destroy',
++	'Recorder.start',
++	'Recorder.pause',
++	'Recorder.resume',
++	'Recorder.stop',
++	'Recorder.onStart',
++	'Recorder.onPause',
++	'Recorder.onStop',
++	'Recorder.onError',
++	'Recorder.onInterruptionBegin',
++	'Recorder.onInterruptionEnd',
++	'Recorder.offStart',
++	'Recorder.offPause',
++	'Recorder.offStop',
++	'Recorder.offError',
++	'Recorder.offInterruptionBegin',
++	'Recorder.offInterruptionEnd',
+ ])
+ for (const f of Object.values(apiInfo)) {
+ 	for (const [k, v] of Object.entries(f)) {
+-- 
+2.50.1 (Apple Git-155)
+
