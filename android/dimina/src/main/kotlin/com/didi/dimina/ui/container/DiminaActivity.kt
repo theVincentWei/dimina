@@ -2048,7 +2048,17 @@ class DiminaActivity : ComponentActivity() {
                                 }
                             },
                             actions = {
-                                Spacer(modifier = Modifier.width(MenuButtonLayout.TRAILING_OCCUPIED_WIDTH_DP.dp))
+                                // 标题让位(2026-11-12):胶囊足迹 + 静音钮激活时再加它的槽位,
+                                // 长标题不再压到静音钮上。
+                                Spacer(
+                                    modifier = Modifier.width(
+                                        (MenuButtonLayout.TRAILING_OCCUPIED_WIDTH_DP +
+                                            if (miniProgramAudioActive.value) {
+                                                MenuButtonLayout.HEIGHT_DP + NOTIFY_ENTRY_GAP_DP
+                                            } else 0
+                                        ).dp
+                                    )
+                                )
                             }
                         )
                     }
