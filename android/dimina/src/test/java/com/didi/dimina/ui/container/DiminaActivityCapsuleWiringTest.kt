@@ -131,8 +131,9 @@ class DiminaActivityCapsuleWiringTest {
             activitySource.contains("onMoreClick = {\n                            showMiniProgramMenu.value = true\n                        }"),
         )
         assertTrue(
-            "capsule close button must still hide the mini program",
-            activitySource.contains("onCloseClick = { hideMiniProgram() }"),
+            // 2026-11-12 对齐微信语义:胶囊 ✕ = 真退出(销毁运行时),收后台只走 ⋯菜单「浮窗」。
+            "capsule close button must exit the mini program (destroy runtime, WeChat semantics)",
+            activitySource.contains("onCloseClick = { exitMiniProgram() }"),
         )
         assertTrue(
             "collapsed handle must still expand on tap",

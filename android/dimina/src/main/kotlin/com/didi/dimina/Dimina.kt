@@ -17,6 +17,7 @@ import com.didi.dimina.common.LogUtils
 import com.didi.dimina.common.PathUtils
 import com.didi.dimina.common.StoreUtils
 import com.didi.dimina.core.MiniApp
+import com.didi.dimina.core.MiniProgramLifecycleListener
 import com.didi.dimina.core.RemoteUpdateManager
 import com.didi.dimina.ui.container.DiminaActivity
 import kotlinx.coroutines.CoroutineScope
@@ -217,6 +218,16 @@ class Dimina private constructor(context: Context) {
      */
     fun setOnMiniProgramUpdateListener(listener: MiniProgramUpdateListener?) {
         MiniApp.getInstance().setOnUpdateListener(listener)
+    }
+
+    /**
+     * 浮窗链路（2026-11-12）：宿主注册生命周期监听。
+     * floated=⋯菜单「浮窗」收后台成功（宿主应显示浮窗球）；foregrounded=小程序回到
+     * 前台（收起浮窗球）；runtimeDestroyed=运行时销毁（收起浮窗球）。回调都在主线程。
+     * 传 null 注销。
+     */
+    fun setOnMiniProgramLifecycleListener(listener: MiniProgramLifecycleListener?) {
+        MiniApp.getInstance().setOnLifecycleListener(listener)
     }
 
     /** Hosts may forward their own pressure source here as well. */

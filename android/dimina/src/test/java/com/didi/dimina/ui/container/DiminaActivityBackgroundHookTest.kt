@@ -204,7 +204,9 @@ class DiminaActivityBackgroundHookTest {
     fun `native close affordances retain the task and preserve opener return options`() {
         // closeMiniProgram is the raw "finish every Activity of this appId" primitive: it neither
         // queues the opener's scene 1038 payload nor runs the page-hide-before-app-hide ordering.
-        // Capsule/menu close retains the task, but must still restore the opener's scene and
+        // Since 2026-11-12 (WeChat semantics) capsule ✕ / root back / menu close EXIT via
+        // exitMiniProgram (which queues the opener payload then closes); only the ⋯menu「浮窗」
+        // retains the task via hideMiniProgram — which must still restore the opener's scene and
         // return options just like an explicit navigateBackMiniProgram operation.
         val content = bodyOf("DiminaContent")
         assertTrue(

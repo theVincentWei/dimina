@@ -102,7 +102,9 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.PathFillType
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.graphics.vector.PathParser
 import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.toArgb
@@ -616,7 +618,7 @@ class DiminaActivity : ComponentActivity() {
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (miniProgram.root) hideMiniProgram() else finish()
+                if (miniProgram.root) exitMiniProgram() else finish()
             }
         })
 
@@ -1827,6 +1829,8 @@ class DiminaActivity : ComponentActivity() {
         super.onStart()
         if (!destroyedByHost && isMiniProgramInitialized && visibilityTracker.onActivityVisible(miniProgram.appId, this)) {
             dispatchMiniProgramShow()
+            // 浮窗链路(2026-11-12):小程序回到前台,宿主收起对应浮窗球。
+            MiniApp.getInstance().notifyForegrounded(miniProgram.appId)
         }
         suspendedForMiniProgramNavigation = false
     }
@@ -1870,6 +1874,8 @@ class DiminaActivity : ComponentActivity() {
         if (suspendedForMiniProgramNavigation) {
             if (visibilityTracker.onActivityVisible(miniProgram.appId, this)) {
                 dispatchMiniProgramShow()
+                // 浮窗链路(2026-11-12):A→B 导航返回后的前台恢复同样收球。
+                MiniApp.getInstance().notifyForegrounded(miniProgram.appId)
             }
             suspendedForMiniProgramNavigation = false
         }
@@ -1944,9 +1950,17 @@ class DiminaActivity : ComponentActivity() {
                     showMiniProgramMenu.value = false
                     reenterMiniProgram()
                 },
+                onFloatClick = {
+                    showMiniProgramMenu.value = false
+                    // 浮窗(2026-11-12):唯一收后台入口。整栈保留+运行时保留,
+                    // 并经 notifyFloated 通知宿主弹浮窗球。
+                    hideMiniProgram()
+                },
                 onCloseClick = {
                     showMiniProgramMenu.value = false
-                    hideMiniProgram()
+                    // 关闭小程序=真退出(2026-11-12 对齐微信语义):销毁运行时,
+                    // 下次打开冷启动;收后台请走「浮窗」。
+                    exitMiniProgram()
                 },
                 onDismiss = {
                     showMiniProgramMenu.value = false
@@ -2012,7 +2026,7 @@ class DiminaActivity : ComponentActivity() {
                                 Row {
                                     if (!miniProgram.root || !Dimina.getInstance().shouldShowCapsule()) {
                                         IconButton(onClick = {
-                                            if (miniProgram.root) hideMiniProgram() else finish()
+                                            if (miniProgram.root) exitMiniProgram() else finish()
                                         }) {
                                             Icon(
                                                 imageVector = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
@@ -2319,7 +2333,7 @@ class DiminaActivity : ComponentActivity() {
                         onMoreClick = {
                             showMiniProgramMenu.value = true
                         },
-                        onCloseClick = { hideMiniProgram() },
+                        onCloseClick = { exitMiniProgram() },
                         modifier = Modifier
                             .align(Alignment.TopEnd)
                             .padding(
@@ -2357,6 +2371,9 @@ class DiminaActivity : ComponentActivity() {
         val returnTask = returnTasks[miniProgram.appId]
         getSystemService(ActivityManager::class.java).appTasks
             .firstOrNull { it.taskInfo.taskId == returnTask }?.moveToFront()
+        // 浮窗(2026-11-12):整栈收后台成功,通知宿主显示浮窗球(带图标)。
+        MiniApp.getInstance()
+            .notifyFloated(miniProgram.appId, miniProgram.name, miniProgram.iconPng)
     }
 
     private fun closeMiniProgram() {
@@ -2412,6 +2429,8 @@ class DiminaActivity : ComponentActivity() {
         if (!suspendedForMiniProgramNavigation) return
         if (visibilityTracker.onActivityVisible(miniProgram.appId, this)) {
             dispatchMiniProgramShow()
+            // 浮窗链路(2026-11-12):导航失败回退的前台恢复同样收球。
+            MiniApp.getInstance().notifyForegrounded(miniProgram.appId)
         }
         getActiveBridge()?.pageShow()
         suspendedForMiniProgramNavigation = false
@@ -2614,6 +2633,7 @@ class DiminaActivity : ComponentActivity() {
         iconPng: ByteArray?,
         versionName: String,
         versionCode: Int,
+        onFloatClick: () -> Unit,
         onReenterClick: () -> Unit,
         onCloseClick: () -> Unit,
         onDismiss: () -> Unit
@@ -2716,6 +2736,16 @@ class DiminaActivity : ComponentActivity() {
                         .padding(horizontal = 24.dp, vertical = 20.dp),
                     horizontalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
+                    MiniProgramMenuItem(
+                        label = "浮窗",
+                        icon = FloatWindowIcon,
+                        contentDescription = "浮窗",
+                        onClick = onFloatClick,
+                        tileBackground = sheetTileBg,
+                        iconTint = sheetTileIcon,
+                        labelColor = sheetTileLabel,
+                        modifier = Modifier.width(78.dp)
+                    )
                     MiniProgramMenuItem(
                         label = "重新进入\n小程序",
                         icon = Icons.Filled.Refresh,
@@ -3493,3 +3523,46 @@ class DiminaActivity : ComponentActivity() {
         }
     }
 }
+
+/**
+ * 「浮窗」宫格图标（2026-11-12）：窗口描边 + 左下小窗（PiP 语义）。
+ * material-icons-core 没有现成的画中画/浮窗字形，手绘一枚，跟随宫格 tint。
+ */
+private val FloatWindowIcon: ImageVector = ImageVector.Builder(
+    name = "FloatWindow",
+    defaultWidth = 24.dp,
+    defaultHeight = 24.dp,
+    viewportWidth = 24f,
+    viewportHeight = 24f,
+).path(
+    pathFillType = PathFillType.EvenOdd,
+) {
+        // 外圈:圆角矩形 (3,4)-(21,18) r=2
+        moveTo(5f, 4f)
+        horizontalLineTo(19f)
+        arcToRelative(2f, 2f, 0f, false, true, 2f, 2f)
+        verticalLineTo(16f)
+        arcToRelative(2f, 2f, 0f, false, true, -2f, 2f)
+        horizontalLineTo(5f)
+        arcToRelative(2f, 2f, 0f, false, true, -2f, -2f)
+        verticalLineTo(6f)
+        arcToRelative(2f, 2f, 0f, false, true, 2f, -2f)
+        close()
+        // 内孔:挖空成描边环
+        moveTo(6.6f, 5.6f)
+        horizontalLineTo(17.4f)
+        arcToRelative(0.9f, 0.9f, 0f, false, true, 0.9f, 0.9f)
+        verticalLineTo(15.5f)
+        arcToRelative(0.9f, 0.9f, 0f, false, true, -0.9f, 0.9f)
+        horizontalLineTo(6.6f)
+        arcToRelative(0.9f, 0.9f, 0f, false, true, -0.9f, -0.9f)
+        verticalLineTo(6.5f)
+        arcToRelative(0.9f, 0.9f, 0f, false, true, 0.9f, -0.9f)
+        close()
+        // 左下小窗:even-odd 在孔内重新填充
+        moveTo(6.5f, 10.5f)
+        horizontalLineTo(11f)
+        verticalLineTo(15f)
+        horizontalLineTo(6.5f)
+        close()
+}.build()

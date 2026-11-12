@@ -144,6 +144,32 @@ class MiniApp private constructor() {
     internal fun notifyInstalled(appId: String, versionCode: Int, versionName: String) =
         notifyUpdate(appId) { it.onInstalled(appId, versionCode, versionName) }
 
+    // 框架侧浮窗/生命周期事件(MiniProgramLifecycleListener):宿主注册,统一主线程回调。
+    private var lifecycleListener: MiniProgramLifecycleListener? = null
+
+    @androidx.annotation.MainThread
+    fun setOnLifecycleListener(listener: MiniProgramLifecycleListener?) {
+        lifecycleListener = listener
+    }
+
+    private fun notifyLifecycle(notify: (MiniProgramLifecycleListener) -> Unit) {
+        updateMainHandler.post {
+            lifecycleListener?.let(notify)
+        }
+    }
+
+    /** ⋯菜单「浮窗」成功收后台(页面栈+运行时保留)时回调,宿主据此显示浮窗球。 */
+    internal fun notifyFloated(appId: String, appName: String, iconPng: ByteArray?) =
+        notifyLifecycle { it.onFloated(appId, appName, iconPng) }
+
+    /** 小程序回到前台(浮窗恢复/桌面重开)时回调,宿主据此收起浮窗球。 */
+    internal fun notifyForegrounded(appId: String) =
+        notifyLifecycle { it.onForegrounded(appId) }
+
+    /** 运行时销毁(真退出/超时回收/压力回收/宿主 close)时回调,宿主据此收起浮窗球。 */
+    internal fun notifyRuntimeDestroyed(appId: String) =
+        notifyLifecycle { it.onRuntimeDestroyed(appId) }
+
     // Map to store JsCore instances for each MiniProgram
     private val jsCoreMap = mutableMapOf<String, JsCore>()
 
@@ -663,6 +689,10 @@ class MiniApp private constructor() {
         bridgeListMap.remove(appId)?.let { bridges ->
             LogUtils.d(tag, "Removed ${bridges.size} bridges for appId: $appId")
         }
+
+        // 运行时就此消失(真退出/回收/宿主 close 都汇到 clear):宿主的浮窗球
+        // 若还挂着这个 app,靠这一下收起。
+        notifyRuntimeDestroyed(appId)
     }
 
     /**
