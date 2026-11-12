@@ -1933,6 +1933,7 @@ class DiminaActivity : ComponentActivity() {
         }
         if (showMiniProgramMenu.value) {
             MiniProgramMenuSheet(
+                appId = miniProgram.appId,
                 appName = miniProgram.name.ifBlank {
                     navigationBarTitle.value.ifBlank { "小程序" }
                 },
@@ -2608,6 +2609,7 @@ class DiminaActivity : ComponentActivity() {
     @OptIn(ExperimentalMaterial3Api::class)
     @Composable
     private fun MiniProgramMenuSheet(
+        appId: String,
         appName: String,
         iconPng: ByteArray?,
         versionName: String,
@@ -2633,6 +2635,19 @@ class DiminaActivity : ComponentActivity() {
         // 头部图标:宿主传入的 PNG(桌面/市场同款字形)优先,无则回落首字母瓦片
         val headerIcon = remember(iconPng) {
             iconPng?.let { runCatching { BitmapFactory.decodeByteArray(it, 0, it.size) }.getOrNull() }
+        }
+        // 版本自取兜底(2026-11-12):老宿主(通知入口等)不传版本时,弹层出现即
+        // 小程序必然已装,直接读已装包 config.json(RemoteUpdateManager 写入,
+        // 恒为运行版本的事实来源)补齐版本名/号;仍缺才落「小程序」。
+        val (sheetVersionName, sheetVersionCode) = remember(appId, versionName, versionCode) {
+            if (versionName.isNotBlank() || versionCode > 0) {
+                versionName to versionCode
+            } else {
+                runCatching {
+                    val cfg = JSONObject(File(filesDir, "jsapp/$appId/config.json").readText())
+                    cfg.optString("versionName").trim() to cfg.optInt("versionCode", 0)
+                }.getOrDefault("" to 0)
+            }
         }
         val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
         ModalBottomSheet(
@@ -2681,10 +2696,10 @@ class DiminaActivity : ComponentActivity() {
                         )
                         Text(
                             // 版本副标题(2026-11-12):应用名下直接标「v版本名」(bundle version.name);
-                            // 缺版本名回落 v版本号,两者都缺回落「小程序」(老宿主兼容)。
+                            // 缺版本名回落 v版本号,宿主没传时自取已装包 config.json,仍缺才落「小程序」。
                             text = when {
-                                versionName.isNotBlank() -> "v" + versionName.trim().removePrefix("v")
-                                versionCode > 0 -> "v$versionCode"
+                                sheetVersionName.isNotBlank() -> "v" + sheetVersionName.trim().removePrefix("v")
+                                sheetVersionCode > 0 -> "v$sheetVersionCode"
                                 else -> "小程序"
                             },
                             fontSize = 14.sp,

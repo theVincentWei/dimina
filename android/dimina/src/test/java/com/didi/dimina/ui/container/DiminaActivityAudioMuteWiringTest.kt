@@ -18,6 +18,8 @@ import java.io.File
  *   applied to live instances immediately and to instances created later;
  * - app session teardown (clearApp) resets both the audio-touched and mute state;
  * - the menu sheet subtitle shows "v<versionName>" (versionCode fallback, 小程序 last);
+ *   when the host passes no version at all, the sheet self-serves the installed
+ *   package's config.json (written by RemoteUpdateManager, always the running version);
  * - the launch loading mask follows the system theme and paints the package icon as a circle
  *   (letter tile only as fallback).
  *
@@ -100,11 +102,25 @@ class DiminaActivityAudioMuteWiringTest {
 
     @Test
     fun `menu sheet subtitle shows the version line`() {
+        // 宿主传了版本名:v版本名;缺名落 v版本号,两者都缺落「小程序」。
         assertTrue(
-            activitySource.contains("\"v\" + versionName.trim().removePrefix(\"v\")"),
+            activitySource.contains("\"v\" + sheetVersionName.trim().removePrefix(\"v\")"),
         )
         assertTrue(
-            activitySource.contains("versionCode > 0 -> \"v\$versionCode\""),
+            activitySource.contains("sheetVersionCode > 0 -> \"v\$sheetVersionCode\""),
+        )
+        // 宿主没传版本(老宿主/通知入口):弹层出现即小程序必然已装,
+        // 直接自取已装包 config.json(RemoteUpdateManager 写入)兜底。
+        assertTrue(
+            "the sheet must self-serve the installed config.json when the host passes no version",
+            activitySource.contains("jsapp/\$appId/config.json"),
+        )
+        assertTrue(
+            activitySource.contains("cfg.optString(\"versionName\").trim() to cfg.optInt(\"versionCode\", 0)"),
+        )
+        assertTrue(
+            "the self-serve must engage only when the host passed neither name nor code",
+            activitySource.contains("if (versionName.isNotBlank() || versionCode > 0)"),
         )
     }
 
