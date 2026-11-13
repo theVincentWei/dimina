@@ -1,0 +1,266 @@
+/**
+ * 传感器调试面板样式。浮在容器页面层(document.body 直挂),跟系统深浅色
+ * (prefers-color-scheme),不依赖小程序深色主题;变量集中在根类上,两种模式各一份。
+ */
+
+.dimina-sensor-panel {
+	--sp-bg: #ffffff;
+	--sp-bg-soft: #f5f6f7;
+	--sp-fg: #1f2329;
+	--sp-muted: #6b7280;
+	--sp-border: rgba(0, 0, 0, 0.12);
+	--sp-accent: #07c160;
+	--sp-accent-soft: rgba(7, 193, 96, 0.14);
+	--sp-shadow: 0 8px 28px rgba(0, 0, 0, 0.18);
+
+	position: fixed;
+	right: 16px;
+	bottom: 16px;
+	z-index: 2147483000;
+	font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+	font-size: 12px;
+	color: var(--sp-fg);
+	user-select: none;
+
+	@media (prefers-color-scheme: dark) {
+		--sp-bg: #24272c;
+		--sp-bg-soft: #1b1e22;
+		--sp-fg: #e8eaed;
+		--sp-muted: #9aa0a6;
+		--sp-border: rgba(255, 255, 255, 0.14);
+		--sp-accent: #2bd473;
+		--sp-accent-soft: rgba(43, 212, 115, 0.18);
+		--sp-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
+	}
+
+	&__fab {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 40px;
+		height: 40px;
+		margin-left: auto;
+		border: 1px solid var(--sp-border);
+		border-radius: 50%;
+		background: var(--sp-bg);
+		color: var(--sp-accent);
+		box-shadow: var(--sp-shadow);
+		cursor: pointer;
+		transition: transform 0.15s ease;
+
+		&:hover {
+			transform: scale(1.06);
+		}
+	}
+
+	&__drawer {
+		display: none;
+		width: 300px;
+		max-height: min(62vh, 480px);
+		margin-bottom: 8px;
+		overflow: auto;
+		border: 1px solid var(--sp-border);
+		border-radius: 12px;
+		background: var(--sp-bg);
+		box-shadow: var(--sp-shadow);
+	}
+
+	&.is-open &__drawer {
+		display: block;
+	}
+
+	&.is-open &__fab {
+		color: var(--sp-muted);
+	}
+
+	&__header {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 10px 12px;
+		border-bottom: 1px solid var(--sp-border);
+		position: sticky;
+		top: 0;
+		background: var(--sp-bg);
+	}
+
+	&__title {
+		font-size: 13px;
+		font-weight: 600;
+	}
+
+	&__hint {
+		margin-left: auto;
+		padding: 2px 6px;
+		border-radius: 4px;
+		background: var(--sp-bg-soft);
+		color: var(--sp-muted);
+		font-size: 10px;
+	}
+
+	&__close {
+		width: 22px;
+		height: 22px;
+		border: none;
+		border-radius: 6px;
+		background: transparent;
+		color: var(--sp-muted);
+		cursor: pointer;
+
+		&:hover {
+			background: var(--sp-bg-soft);
+			color: var(--sp-fg);
+		}
+	}
+
+	&__tabs {
+		display: flex;
+		gap: 4px;
+		padding: 8px 10px 0;
+	}
+
+	&__tab {
+		flex: 1;
+		padding: 5px 0;
+		border: 1px solid transparent;
+		border-radius: 7px;
+		background: transparent;
+		color: var(--sp-muted);
+		font-size: 12px;
+		cursor: pointer;
+
+		&.is-active {
+			background: var(--sp-accent-soft);
+			border-color: var(--sp-accent);
+			color: var(--sp-accent);
+			font-weight: 600;
+		}
+	}
+
+	&__body {
+		padding: 10px 12px 4px;
+	}
+
+	&__row {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 4px 0;
+	}
+
+	&__axis {
+		width: 18px;
+		color: var(--sp-muted);
+		text-align: right;
+	}
+
+	&__slider {
+		flex: 1;
+		accent-color: var(--sp-accent);
+	}
+
+	&__val {
+		min-width: 74px;
+		color: var(--sp-fg);
+		font-variant-numeric: tabular-nums;
+	}
+
+	&__actions {
+		display: flex;
+		gap: 8px;
+		padding: 8px 0 2px;
+	}
+
+	&__btn {
+		flex: 1;
+		padding: 6px 0;
+		border: 1px solid var(--sp-border);
+		border-radius: 8px;
+		background: var(--sp-bg-soft);
+		color: var(--sp-fg);
+		font-size: 12px;
+		cursor: pointer;
+
+		&:active {
+			background: var(--sp-accent-soft);
+			border-color: var(--sp-accent);
+		}
+	}
+
+	&__toggle {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		padding: 8px 12px;
+		color: var(--sp-fg);
+		cursor: pointer;
+
+		&--global {
+			border-top: 1px solid var(--sp-border);
+			position: sticky;
+			bottom: 0;
+			background: var(--sp-bg);
+		}
+
+		input {
+			accent-color: var(--sp-accent);
+		}
+	}
+
+	&__dial-wrap {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		padding-bottom: 8px;
+	}
+
+	&__dial {
+		position: relative;
+		width: 108px;
+		height: 108px;
+		border: 1.5px solid var(--sp-border);
+		border-radius: 50%;
+		background: var(--sp-bg-soft);
+		touch-action: none;
+		cursor: grab;
+
+		&:active {
+			cursor: grabbing;
+		}
+	}
+
+	&__dial-n {
+		position: absolute;
+		top: 4px;
+		left: 50%;
+		transform: translateX(-50%);
+		color: var(--sp-muted);
+		font-size: 10px;
+		font-weight: 700;
+	}
+
+	&__needle {
+		position: absolute;
+		top: 50%;
+		left: 50%;
+		width: 2.5px;
+		height: 74px;
+		background: linear-gradient(to top, var(--sp-muted) 0 50%, var(--sp-accent) 50% 100%);
+		transform-origin: center;
+		translate: -50% -50%;
+		border-radius: 2px;
+		pointer-events: none;
+	}
+
+	&__dial-reading {
+		padding-top: 6px;
+		color: var(--sp-muted);
+		font-variant-numeric: tabular-nums;
+
+		span {
+			color: var(--sp-fg);
+			font-size: 16px;
+			font-weight: 600;
+		}
+	}
+}

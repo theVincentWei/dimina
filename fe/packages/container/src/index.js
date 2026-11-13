@@ -4,6 +4,8 @@ import { AppList } from '@/pages/appList/appList'
 import { Device } from '@/pages/device/device'
 import { getMiniAppInfo, manifestInfoCache, resolveManifestResourceBaseUrl } from '@/services'
 import { registerInnerAudioApi } from './innerAudioHost'
+import { registerSensorApi } from './sensorHost'
+import { mountSensorPanelIfRequested } from './sensorPanel'
 import '@/styles/app.scss'
 
 // 万器(dsh-go AppHub)网关固定基址。request 胶水(dev 下)对它的请求剥掉 origin
@@ -201,10 +203,18 @@ window.onload = function () {
 	 */
 	registerInnerAudioApi(container)
 
+	/**
+	 * 传感器宿主(DeviceMotion/Orientation 真实源 + ?sensorPanel=1 调试面板注入源):
+	 * 16 个 wire API(on/off/start/stop × 加速度计/罗盘/陀螺仪/设备方向),详见 sensorHost.js。
+	 */
+	registerSensorApi(container)
+
 	const appListPage = new AppList(container)
 	container.setRootView(appListPage)
 
 	const searchParams = new URLSearchParams(window.location.search)
+	// 传感器调试面板:?sensorPanel=1 显式开启(生产构建也可用),挂 document.body。
+	mountSensorPanelIfRequested(searchParams)
 	const manifestUrl = searchParams.get('manifestUrl')
 	if (manifestUrl) {
 		resolveManifestResourceBaseUrl(null, manifestUrl)
