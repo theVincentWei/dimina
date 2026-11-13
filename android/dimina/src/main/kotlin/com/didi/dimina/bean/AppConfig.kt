@@ -45,6 +45,13 @@ data class WindowConfig(
     val backgroundColor: String? = null,
     val navigationStyle: String? = null,
     val homeButton: Boolean? = null,
+    /**
+     * 微信语义沉浸式全屏(2026-11-13):app.json window.fullscreen = true 时容器
+     * 隐藏系统状态栏(immersive sticky,下拉暂现自动收回)。小游戏不经此字段
+     * ——runtimeType = "game" 一律沉浸(见 FullScreenPolicy)。编译器对 window
+     * 整键透传,无需编译侧改动;旧包无此字段 = null = 行为与现状完全一致。
+     */
+    val fullscreen: Boolean? = null,
 )
 
 @Serializable

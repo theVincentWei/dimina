@@ -18,6 +18,7 @@ import android.provider.Settings
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowInsets
+import android.view.WindowManager
 import android.view.animation.AccelerateDecelerateInterpolator
 import android.webkit.WebView
 import android.widget.FrameLayout
@@ -132,6 +133,7 @@ import com.didi.dimina.bean.TabBarConfig
 import com.didi.dimina.bean.TabBarItem
 import com.didi.dimina.common.BundledResourcePolicy
 import com.didi.dimina.common.CapsuleStyle
+import com.didi.dimina.common.FullScreenPolicy
 import com.didi.dimina.common.LogUtils
 import com.didi.dimina.common.MenuButtonLayout
 import com.didi.dimina.common.PathUtils
@@ -220,6 +222,13 @@ class DiminaActivity : ComponentActivity() {
     private val capsuleCollapsed = mutableStateOf(false)
     // 主题 tick:每次 resume 自增,胶囊重组时重读容器配色(updateCapsuleTheme 生效)。
     private val capsuleThemeTick = mutableIntStateOf(0)
+
+    // 微信语义沉浸式全屏(2026-11-13):小游戏一律沉浸,小程序按 window.fullscreen
+    // 声明(判定唯一入口 FullScreenPolicy)。true 时隐藏系统状态栏(immersive
+    // sticky:下拉暂现、松手自动收回),窗口放行刘海(SHORT_EDGES),胶囊/页面
+    // 内容随 insets 自动上收。setInitialStyle(配置三路径共用)驱动,onResume 重申
+    // (浮窗回来/下拉暂现后的窗口态归位)。
+    private val immersiveFullScreen = mutableStateOf(false)
 
     // 胶囊左侧静音钮(2026-11-12):「显示」= 包声明 requiredBackgroundModes 含 "audio"
     // (配置就绪即显)或 AudioApi 首次创建实例(未声明老包兜底);渲染在胶囊展开分支内,
@@ -885,11 +894,50 @@ class DiminaActivity : ComponentActivity() {
         reapplyThemeStyles()
         // 页面身份变化时 JS 侧看到的 systemInfo 快照也会随之刷新,推主题的必要性重新记账
         lastPushedJsTheme = currentJsTheme()
+        // 微信语义全屏:配置解析到位才落窗口态(onCreate 期配置未明,先按系统
+        // 默认渲染,毫秒级窗口期)。判定收在 FullScreenPolicy,勿在调用点散开。
+        setImmersiveFullScreen(
+            FullScreenPolicy.shouldGoImmersive(appConfig.app.runtimeType, appConfig.app.window),
+        )
         // 壳就绪放在最后:此时 backgroundColor 已按主题解析为页面配置底色,
         // 壳就位瞬间内容区即页面底色,不存在默认白中间帧。setInitialStyle 被
         // initialize(首开)/updatePath(redirect)/onNewIntent(复用)三条路径共用,
         // 幂等置 true,后两条路径 shellReady 已为 true 不触发额外重组。
         shellReady.value = true
+    }
+
+    /**
+     * 沉浸式窗口态落位(幂等):enabled=true 隐藏系统状态栏(immersive sticky,
+     * 下拉暂现、松手自动收回)并放行刘海(SHORT_EDGES);false 显式恢复显隐为
+     * 系统默认。窗口 insets 收缩后,顶栏占位(statusBarHeight)、胶囊锚点
+     * (systemBars ∪ displayCutout)与 JS 的 systemInfo.statusBarHeight 全部走
+     * 运行时 insets 同步上收,无需各自的特殊分支。
+     *
+     * cutout 模式只在 P+(API 28)可设(minSdk 26);低版本无刘海语义,跳过。
+     * 注意 insets controller 状态跟随「当前顶层窗口」:本 Activity finish 后
+     * 系统自动按下一个窗口(Flutter 主窗/上一页)的期望态恢复状态栏,无需 here
+     * 补偿;onResume 只对 true 重申,不主动 show。
+     */
+    private fun setImmersiveFullScreen(enabled: Boolean) {
+        immersiveFullScreen.value = enabled
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            window.attributes = window.attributes.apply {
+                layoutInDisplayCutoutMode =
+                    if (enabled) {
+                        WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                    } else {
+                        WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT
+                    }
+            }
+        }
+        val controller = WindowInsetsControllerCompat(window, window.decorView)
+        controller.systemBarsBehavior =
+            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        if (enabled) {
+            controller.hide(WindowInsetsCompat.Type.statusBars())
+        } else {
+            controller.show(WindowInsetsCompat.Type.statusBars())
+        }
     }
 
     /**
@@ -1871,6 +1919,10 @@ class DiminaActivity : ComponentActivity() {
         if (destroyedByHost) return
         // 主题 tick:让胶囊重组重读容器配色(updateCapsuleTheme 在宿主侧发生)。
         capsuleThemeTick.intValue++
+        // 沉浸式重申:浮窗收后台再回前台、下拉暂现sticky收回或上一窗口改过系统
+        // 栏态,回到前台时期望态以本 Activity 为准(仅 true 时重申 hide;false 的
+        // 包不碰系统栏,行为与历史版本一致)。
+        if (immersiveFullScreen.value) setImmersiveFullScreen(true)
         if (suspendedForMiniProgramNavigation) {
             if (visibilityTracker.onActivityVisible(miniProgram.appId, this)) {
                 dispatchMiniProgramShow()
