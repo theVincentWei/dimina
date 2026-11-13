@@ -3,6 +3,7 @@ import '@dimina/fe-container-sdk/style.css'
 import { AppList } from '@/pages/appList/appList'
 import { Device } from '@/pages/device/device'
 import { getMiniAppInfo, manifestInfoCache, resolveManifestResourceBaseUrl } from '@/services'
+import { registerInnerAudioApi } from './innerAudioHost'
 import '@/styles/app.scss'
 
 // 万器(dsh-go AppHub)网关固定基址。request 胶水(dev 下)对它的请求剥掉 origin
@@ -192,6 +193,13 @@ window.onload = function () {
 				onComplete?.()
 			})
 	})
+
+	/**
+	 * InnerAudioContext 宿主实现(HTMLAudioElement):服务侧逻辑层有完整 API 壳,
+	 * 但 SDK 不内置宿主播放器,这里接上,让小程序的音效/音频在浏览器里可听。
+	 * Recorder.*(录音)未实现,继续落 unsupported。
+	 */
+	registerInnerAudioApi(container)
 
 	const appListPage = new AppList(container)
 	container.setRootView(appListPage)
