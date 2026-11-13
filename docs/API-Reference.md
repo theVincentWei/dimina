@@ -462,6 +462,22 @@ DMPApp.init(context, { virtualFilePrefix: 'host-file://' })
 |               | getClipboardData                 | ✓       | ✓   | ✓       | ✓   |
 | 设备 - 震动   | vibrateShort                     | ✓       | ✓   | ✓       | ✗   |
 |               | vibrateLong                      | ✓       | ✓   | ✓       | ✗   |
+| 设备 - 加速度计 | onAccelerometerChange          | ✓       | ✗   | ✗       | ✓   |
+|               | offAccelerometerChange           | ✓       | ✗   | ✗       | ✓   |
+|               | startAccelerometer               | ✓       | ✗   | ✗       | ✓   |
+|               | stopAccelerometer                | ✓       | ✗   | ✗       | ✓   |
+| 设备 - 罗盘   | onCompassChange                  | ✓       | ✗   | ✗       | ✓   |
+|               | offCompassChange                 | ✓       | ✗   | ✗       | ✓   |
+|               | startCompass                     | ✓       | ✗   | ✗       | ✓   |
+|               | stopCompass                      | ✓       | ✗   | ✗       | ✓   |
+| 设备 - 陀螺仪 | onGyroscopeChange                | ✓       | ✗   | ✗       | ✓   |
+|               | offGyroscopeChange               | ✓       | ✗   | ✗       | ✓   |
+|               | startGyroscope                   | ✓       | ✗   | ✗       | ✓   |
+|               | stopGyroscope                    | ✓       | ✗   | ✗       | ✓   |
+| 设备 - 设备方向 | onDeviceMotionChange           | ✓       | ✗   | ✗       | ✓   |
+|               | offDeviceMotionChange            | ✓       | ✗   | ✗       | ✓   |
+|               | startDeviceMotionListening       | ✓       | ✗   | ✗       | ✓   |
+|               | stopDeviceMotionListening        | ✓       | ✗   | ✗       | ✓   |
 | 设备 - 键盘   | hideKeyboard                     | ✓       | ✓   | ✓       | ✗   |
 | 设备 - 网络   | getNetworkType                   | ✓       | ✓   | ✓       | ✓   |
 |               | onNetworkStatusChange            | ✓       | ✓   | ✓       | ✓   |
@@ -484,6 +500,7 @@ DMPApp.init(context, { virtualFilePrefix: 'host-file://' })
 - `compressVideo` 的精细编码参数受平台编码器能力约束：Android 和 HarmonyOS 会请求目标码率/分辨率，iOS 依据 `quality`/`resolution` 选择系统导出预设；编码器可能降级参数，但不会用原文件复制冒充压缩结果。
 - `createVideoDecoder` 提供后台逐帧解码、同步 RGBA 取帧、异步控制和 `start` / `stop` / `seek` / `ended` 事件；编码格式受系统解码器限制，三端真机播放仍需验收；Web 需安全上下文、OffscreenCanvas 和 WebCodecs，并在 start 时检查 MP4 编码支持。`bufferchange` 和音轨暂不支持。接入与 libpag 的 Wasm 能力边界见[视频解码说明](./VideoDecoder.md)。
 - 音频接口本轮 service 层已提供 `createInnerAudioContext` / `getRecorderManager` 入口，原生侧目前仅 Android 落地（`InnerAudio.*` / `Recorder.*` wire 通道），iOS / Harmony / Web 待后续轮接入；`RecorderManager` 仅支持 aac / wav 两种格式，`onFrameRecorded` 暂未接入。
+- 传感器四通道（加速度计 / 罗盘 / 陀螺仪 / 设备方向）本轮 service 层提供 16 个入口，wire 契约三方一致：`onXxxChange` 的 `success` 是常驻回调 id（同一函数重复 on 拿同一 id，宿主幂等登记），`offXxxChange` 带 id 摘单个、不带 id 摘全部，`start` 带 `interval`（`game`=20ms / `ui`=60ms / `normal`=200ms）由容器负责节流，`onXxxChange` 隐式激活采样无需先 `start`。数据形状对齐微信：加速度计 `{x,y,z}` m/s²、罗盘 `{direction,accuracy}`（0-360，正北 0）、陀螺仪 `{x,y,z}` rad/s、设备方向 `{alpha,beta,gamma}` 角度。Android 用 SensorManager 落地；Web 容器用 DeviceMotion/DeviceOrientation 真实源实现——**Web 容器提供 `?sensorPanel=1` 调试面板**（URL 参数显式开启，生产构建可用）：右下角抽屉按通道分区，滑杆 / 「摇一摇」/「重力翻转」/ 罗盘拖盘与自动旋转 / 「自动摆动」正弦波动向四个通道注入数值，注入与真实源走同一条回点火链路，面板开启时优先于 DOM 事件源；桌面浏览器无这两类事件时静默降级、API 面照常回执。iOS / Harmony 待后续轮接入。
 - 全局 `WXWebAssembly` 提供 libpag 4.5.85 所需的真实 Wasm 执行，包含同步 imports / exports、线性内存扩容、Table 取函数及包内 Brotli 加载；通过 `wx.canIUse('WXWebAssembly')` 检查。iOS 需要系统 JavaScriptCore 支持 ArrayBuffer 分离（iOS 17.4+）。它不属于 `wx` 对象上的方法，支持范围和接入方式见 [WXWebAssembly](./WXWebAssembly.md)。
 - `getUpdateManager` 只负责更新状态通知和重启入口，包下载、校验和动态下发流程请参考[小程序包更新说明](./MiniProgram-Update.md)。
 - `chooseMessageFile` 在 Android、iOS 和 HarmonyOS 上使用系统文件选择器。宿主无法访问微信会话记录，因此 `time` 返回文件修改时间（取不到时为选择时间），不是微信会话发送时间；选中文件会先复制到当前小程序的临时沙箱并返回 `difile://` 路径。
