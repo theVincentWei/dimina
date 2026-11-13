@@ -16,6 +16,14 @@ export default defineConfig(({ command, mode }) => {
 		server: {
 			strictPort: true,
 			open: true, // 启动后是否自动打开浏览器
+			// 万器(dsh-go AppHub)网关同源代理:容器 request 胶水(src/index.js)把
+			// http://127.0.0.1:7610 的请求剥成相对路径走这里转发到本机 server,
+			// 绕开 dev proxy(packages/server)对私网地址的 SSRF 拦截。仅 dev server
+			// 存在,生产构建无此路由。目标可用 DIMINA_WANQI_ORIGIN 覆盖。
+			proxy: {
+				'/api/v1': { target: process.env.DIMINA_WANQI_ORIGIN || 'http://127.0.0.1:7610', changeOrigin: true },
+				'/icons': { target: process.env.DIMINA_WANQI_ORIGIN || 'http://127.0.0.1:7610', changeOrigin: true },
+			},
 		},
 		define: {
 			__DEV__: mode !== 'production',

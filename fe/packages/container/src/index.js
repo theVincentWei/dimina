@@ -5,6 +5,11 @@ import { Device } from '@/pages/device/device'
 import { getMiniAppInfo, manifestInfoCache, resolveManifestResourceBaseUrl } from '@/services'
 import '@/styles/app.scss'
 
+// 万器(dsh-go AppHub)网关固定基址。request 胶水(dev 下)对它的请求剥掉 origin
+// 走 vite dev server 的 /api/v1、/icons 同源代理(vite.config.mjs),不进 dev
+// proxy——后者按 SSRF 防护拒绝私网地址,而网关恰恰在本机回环上。
+const WANQI_GATEWAY_ORIGIN = 'http://127.0.0.1:7610'
+
 window.onload = function () {
 	const device = new Device()
 	const container = createContainer({
@@ -82,6 +87,78 @@ window.onload = function () {
 		const onSuccess = this.createCallbackFunction(success)
 		const onFail = this.createCallbackFunction(fail)
 		const onComplete = this.createCallbackFunction(complete)
+
+		// 万器网关直连分流(仅 dev server 生效,生产构建不含本分支):网关固定基址是
+		// 本机回环,dev proxy 的 SSRF 防护会拒绝它;这里剥掉 origin 变同源相对路径,
+		// 由 vite proxy 转发。方法/头/超时/回调包语义与下方 /proxy 路径保持一致。
+		if (import.meta.env.DEV && typeof url === 'string' && url.startsWith(WANQI_GATEWAY_ORIGIN)) {
+			const requestMethod = method.toUpperCase()
+			const directHeaders = { ...header }
+			let body
+			if (requestMethod !== 'GET' && requestMethod !== 'HEAD' && data !== undefined && data !== null) {
+				if (typeof data === 'string') {
+					body = data
+				}
+				else {
+					if (!Object.keys(directHeaders).some((key) => key.toLowerCase() === 'content-type')) {
+						directHeaders['Content-Type'] = 'application/json'
+					}
+					body = JSON.stringify(data)
+				}
+			}
+
+			const abort = new AbortController()
+			const timer = timeout > 0 ? setTimeout(() => abort.abort(), timeout) : null
+
+			fetch(url.slice(WANQI_GATEWAY_ORIGIN.length), {
+				method: requestMethod,
+				headers: directHeaders,
+				body,
+				signal: abort.signal,
+			})
+				.then(async (response) => {
+					if (!response.ok) {
+						const error = new Error(response.statusText)
+						error.code = response.status
+						throw error
+					}
+
+					const headers = {}
+					response.headers.forEach((value, key) => {
+						headers[key] = value
+					})
+
+					if (responseType === 'arraybuffer') {
+						return { data: await response.arrayBuffer(), header: headers, statusCode: response.status }
+					}
+
+					const text = await response.text()
+					let parsed = text
+					if (dataType === 'json') {
+						try {
+							parsed = JSON.parse(text)
+						}
+						catch {
+							// 与 wx.request 的 json 语义一致:解析失败回落原始文本
+						}
+					}
+					return { data: parsed, header: headers, statusCode: response.status }
+				})
+				.then((data) => {
+					onSuccess?.(data)
+				})
+				.catch((error) => {
+					const message = error.name === 'AbortError' ? `request:fail timeout (${timeout}ms)` : error.message
+					onFail?.({ errMsg: message, errno: error.code })
+				})
+				.finally(() => {
+					if (timer) {
+						clearTimeout(timer)
+					}
+					onComplete?.()
+				})
+			return
+		}
 
 		fetch('http://localhost:7788/proxy', init)
 			.then((response) => {
