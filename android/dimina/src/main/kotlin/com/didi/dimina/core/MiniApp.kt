@@ -21,6 +21,7 @@ import com.didi.dimina.api.device.KeyboardApi
 import com.didi.dimina.api.device.PhoneApi
 import com.didi.dimina.api.device.ScanApi
 import com.didi.dimina.api.device.ScreenApi
+import com.didi.dimina.api.device.SensorApi
 import com.didi.dimina.api.device.VibrateAPI
 import com.didi.dimina.api.media.AudioApi
 import com.didi.dimina.api.media.ImageApi
@@ -115,6 +116,8 @@ class MiniApp private constructor() {
     private val localNetworkApi = LocalNetworkApi()
     private val deviceNetworkApi = com.didi.dimina.api.device.NetworkApi()
     private val fileApi = FileApi()
+    // 传感器采样源按 appId 隔离，销毁/退栈要在 clear(appId) 里停源清订阅
+    private val sensorApi = SensorApi()
     private val updateCheckRegistry = UpdateCheckRegistry()
 
     // 框架侧升级事件(MiniProgramUpdateListener):宿主注册,统一主线程回调。
@@ -443,6 +446,7 @@ class MiniApp private constructor() {
         ContactApi().registerWith(apiRegistry)
         deviceNetworkApi.registerWith(apiRegistry)
         VibrateAPI().registerWith(apiRegistry)
+        sensorApi.registerWith(apiRegistry)
         ScanApi().registerWith(apiRegistry)
         ScreenApi().registerWith(apiRegistry)
         bluetoothApi.registerWith(apiRegistry)
@@ -668,6 +672,8 @@ class MiniApp private constructor() {
         // 清理第三方扩展的持续订阅
         apiRegistry.clearExtSubscriptions(appId)
         bluetoothApi.clearApp(appId)
+        // 停该小程序的传感器采样源并清 keep 订阅
+        sensorApi.clearApp(appId)
         localNetworkApi.clearApp(appId)
         deviceNetworkApi.clearApp(appId)
         fileApi.clearApp(appId)
@@ -732,6 +738,7 @@ class MiniApp private constructor() {
         videoDecoderApi.clearAll()
         audioApi.clearAll()
         recorderApi.clearAll()
+        sensorApi.clearAll()
         // Clear API resources
         apiRegistry.clear()
     }
