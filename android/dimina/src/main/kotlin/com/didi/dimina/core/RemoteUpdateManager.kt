@@ -2,6 +2,7 @@ package com.didi.dimina.core
 
 import android.content.Context
 import com.didi.dimina.api.permission.MiniProgramPermissionStore
+import com.didi.dimina.api.permission.PermLog
 import com.didi.dimina.api.storage.StorageApi
 import com.didi.dimina.bean.MiniProgram
 import com.didi.dimina.common.AtomicZipInstaller
@@ -16,6 +17,7 @@ import java.io.IOException
 import java.security.MessageDigest
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.locks.ReentrantLock
@@ -195,6 +197,48 @@ object RemoteUpdateManager {
     }
 
     internal fun isPackageOperationInProgress(appId: String): Boolean = uninstallingApps.contains(appId)
+
+    // ------------------------------------------------------------------
+    // 权限声明可达性（契约 §3，2026-11-14 真机修复）
+    // ------------------------------------------------------------------
+
+    private const val PERMISSION_REFRESH_THROTTLE_MS = 30_000L
+
+    private val permissionRefreshExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "dimina-perm-refresh").apply { isDaemon = true }
+    }
+    private val permissionRefreshAt = ConcurrentHashMap<String, Long>()
+
+    /**
+     * 打开即刷新声明：正常打开「已有可运行包」的小程序不经过 fetchManifest（只有首装/
+     * 检查更新/autoSync 才会），multi-task 恢复态与旧容器时代安装的存量包声明面会永远
+     * 停在安装时代（2026-11-14 214 真机教训：audio-test v2 声明不可达 → 守门全静默）。
+     *
+     * 这里对已装包主动拉一次 manifest.json——[fetchManifest] 内部会喂
+     * `MiniProgramPermissionStore.onManifest`，账本侧再把缺段 config.json 补写。
+     * 30s 按 appId 节流（activity 重建/快速重开不重复打网）。fire-and-forget：
+     * 失败只落日志，绝不阻塞/拖垮打开链路。
+     */
+    fun refreshPermissionDeclarations(context: Context, miniProgram: MiniProgram) {
+        val manifestUrl = miniProgram.updateManifestUrl.trim()
+        if (manifestUrl.isEmpty()) {
+            PermLog.i("refresh", "${miniProgram.appId} skip: no updateManifestUrl")
+            return
+        }
+        val now = System.currentTimeMillis()
+        val last = permissionRefreshAt[miniProgram.appId] ?: 0L
+        if (now - last < PERMISSION_REFRESH_THROTTLE_MS) return
+        permissionRefreshAt[miniProgram.appId] = now
+        permissionRefreshExecutor.execute {
+            try {
+                val manifest = fetchManifest(manifestUrl)
+                validateManifestAppId(manifest, miniProgram.appId)
+                PermLog.i("refresh", "${miniProgram.appId} ok v${manifest.versionCode}")
+            } catch (e: Exception) {
+                PermLog.i("refresh", "${miniProgram.appId} failed: ${e.message}")
+            }
+        }
+    }
 
     internal fun installLocalPackage(context: Context, appId: String, packagePath: String): JSONObject {
         requireValidAppId(appId)

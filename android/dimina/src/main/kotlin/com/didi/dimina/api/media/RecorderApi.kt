@@ -15,6 +15,7 @@ import com.didi.dimina.api.APIResult
 import com.didi.dimina.api.AsyncResult
 import com.didi.dimina.api.BaseApiHandler
 import com.didi.dimina.api.NoneResult
+import com.didi.dimina.api.permission.PermLog
 import com.didi.dimina.common.ApiUtils
 import com.didi.dimina.common.PathUtils
 import com.didi.dimina.ui.container.DiminaActivity
@@ -583,20 +584,30 @@ class RecorderApi : BaseApiHandler() {
         responseCallback: (String) -> Unit,
     ): APIResult {
         val event = RecorderRules.eventForWire(op)
-            ?: return asyncFail(apiName, "unsupported event $op")
+            ?: run {
+                // 注册/注销失败没有可回执的通道：params.success 挂的就是 app 的事件
+                // listener，任何 callback（含 :ok ack）都会被 JS callback 表误当事件
+                // 触发（2026-11-14 真机教训：invokeSuccess(keepId) ack 让 audio-test
+                // 注册瞬间假触发 onStart/onPause）。因此 on*/off* 一律**免 ack**
+                // （微信语义：注册不触发事件），失败只落 PermLog 可观测。
+                PermLog.i("recorder", "$appId $apiName listen failed: unsupported event $op")
+                return NoneResult()
+            }
         val session = sessions.getOrPut(appId) { Session(appId) }
+        val callbackId = params.optString("success")
         if (op.startsWith("on")) {
-            val callbackId = params.optString("success")
-            if (callbackId.isEmpty()) return asyncFail(apiName, "invalid callback")
+            if (callbackId.isEmpty()) {
+                PermLog.i("recorder", "$appId $apiName listen failed: invalid callback")
+                return NoneResult()
+            }
             session.listeners.getOrPut(event) { ConcurrentHashMap() }[callbackId] =
                 Listener(callbackId, responseCallback)
         } else {
-            val callbackId = params.optString("success")
             session.listeners[event]?.let { listeners ->
                 if (callbackId.isEmpty()) listeners.clear() else listeners.remove(callbackId)
             }
         }
-        return asyncOk(apiName)
+        return NoneResult()
     }
 
     private fun emit(session: Session, event: String, payload: JSONObject) {

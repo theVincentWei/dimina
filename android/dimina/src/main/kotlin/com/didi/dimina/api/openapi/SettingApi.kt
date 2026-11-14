@@ -11,6 +11,7 @@ import com.didi.dimina.api.BaseApiHandler
 import com.didi.dimina.api.NoneResult
 import com.didi.dimina.api.ext.ExtCallback
 import com.didi.dimina.api.permission.MiniProgramPermissionStore
+import com.didi.dimina.api.permission.PermLog
 import com.didi.dimina.api.permission.PermissionFlow
 import com.didi.dimina.api.permission.PermissionGate
 import com.didi.dimina.common.ApiUtils
@@ -73,10 +74,13 @@ class SettingApi(
 
         // v1 诚实不可用：getLocation 未实现，userLocation 从支持面摘除（契约 §1，审计缺陷①）。
         if (scope == SCOPE_USER_LOCATION) {
+            PermLog.i("authorize", "$appId $scope fail not supported")
             return AsyncResult(JSONObject().apply { put("errMsg", "$AUTHORIZE:fail not supported") })
         }
         val level = PermissionGate.scopeLevel(scope)
-            ?: return AsyncResult(JSONObject().apply { put("errMsg", "$AUTHORIZE:fail invalid scope") })
+            ?: return AsyncResult(JSONObject().apply { put("errMsg", "$AUTHORIZE:fail invalid scope") }).also {
+                PermLog.i("authorize", "$appId $scope fail invalid scope")
+            }
 
         // 声明闸：未声明任何敏感能力/该 scope（含 network.domains 未声明）→ 诚实 fail。
         val declared = if (scope == SCOPE_NETWORK) {
@@ -85,10 +89,12 @@ class SettingApi(
             MiniProgramPermissionStore.isDeclared(appId, scope)
         }
         if (!declared) {
+            PermLog.i("authorize", "$appId $scope fail permission undeclared")
             return AsyncResult(JSONObject().apply { put("errMsg", "$AUTHORIZE:fail permission undeclared") })
         }
 
         fun failDeny() {
+            PermLog.i("authorize", "$appId $scope fail auth deny")
             val result = JSONObject().apply { put("errMsg", "$AUTHORIZE:fail auth deny") }
             ApiUtils.invokeFail(params, result, responseCallback)
             ApiUtils.invokeComplete(params, responseCallback, result)
@@ -98,12 +104,14 @@ class SettingApi(
             // OS 位在后：容器 consent 已拿到才触达 OS 运行时权限（无 OS 位的 scope 直接 ok）。
             val permissions = osPermissionsForScope(scope)
             if (permissions == null) {
+                PermLog.i("authorize", "$appId $scope ok (container consent, no OS bit)")
                 val result = JSONObject().apply { put("errMsg", "$AUTHORIZE:ok") }
                 ApiUtils.invokeSuccess(params, result, responseCallback)
                 ApiUtils.invokeComplete(params, responseCallback, result)
                 return
             }
             activity.handleAuthorization(permissions) { granted ->
+                PermLog.i("authorize", "$appId $scope os=$granted")
                 val result = JSONObject().apply {
                     put("errMsg", if (granted) "$AUTHORIZE:ok" else "$AUTHORIZE:fail auth deny")
                 }

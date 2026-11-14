@@ -99,11 +99,14 @@ const API_SCOPE_MAP: Record<string, string> = {
 	...Object.fromEntries(BLUETOOTH_FAMILY.map(name => [name, 'scope.bluetooth'])),
 }
 
-/** wx.* → scope（Recorder.* 前缀兜底，与 Android 同规则）。 */
+/** wx.* → scope（Recorder 操作族闸，onXxx/offXxx 订阅放行，与 Android 同规则）。 */
 export function apiScopeOf(apiName: string): string | null {
 	const mapped = API_SCOPE_MAP[apiName]
 	if (mapped) return mapped
-	if (apiName.startsWith('Recorder.')) return SCOPE_RECORD
+	if (apiName.startsWith('Recorder.')) {
+		const op = apiName.slice('Recorder.'.length)
+		return ['start', 'pause', 'resume', 'stop'].includes(op) ? SCOPE_RECORD : null
+	}
 	return null
 }
 

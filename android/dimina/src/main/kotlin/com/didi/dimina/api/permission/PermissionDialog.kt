@@ -74,6 +74,7 @@ internal object PermissionDialog {
                 activeKey = null
                 maskView?.let { rootView.removeView(it) }
                 sheetView?.let { rootView.removeView(it) }
+                PermLog.i("dialog", "$key ${if (allowed) "allow" else "deny"}")
                 if (allowed) onAllow() else onDeny()
             }
 
@@ -93,6 +94,7 @@ internal object PermissionDialog {
                 }
             }
             // 后加的 ComposeView 在 mask 之上，铺满全屏、内容居中呈现卡片。
+            PermLog.i("dialog", "$key shown (app=$appName)")
             rootView.addView(maskView, ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
             ))

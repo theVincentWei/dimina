@@ -123,12 +123,19 @@ internal object PermissionGate {
     }
 
     /**
-     * API 名 → 目录 scope（null=不归守门管）。精确表 + Recorder.* 前缀兜底
-     * （录音族 16 个名字随 jssdk 演进可能增减，前缀保证新方法不漏闸）。
+     * API 名 → 目录 scope（null=不归守门管）。精确表 + Recorder 前缀规则：
+     * 录音**操作族**（start/pause/resume/stop）闸 scope.record；onXxx/offXxx 是纯事件
+     * 订阅（无 OS/隐私面，onLoad 注册即调），放行不弹窗（微信语义：点 start 才授权；
+     * 2026-11-14 214 真机教训：前缀全闸会把 onLoad 的事件注册也弹窗）。
      */
     internal fun apiScopeOf(apiName: String): String? {
         API_SCOPE_MAP[apiName]?.let { return it }
-        if (apiName.startsWith("Recorder.")) return ScopeKey.RECORD
+        if (apiName.startsWith("Recorder.")) {
+            return when (apiName.substringAfter('.')) {
+                "start", "pause", "resume", "stop" -> ScopeKey.RECORD
+                else -> null
+            }
+        }
         return null
     }
 

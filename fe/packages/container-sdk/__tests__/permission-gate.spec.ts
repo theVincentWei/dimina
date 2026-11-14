@@ -45,9 +45,13 @@ beforeEach(() => {
 })
 
 describe('frozen api→scope mapping (contract §4)', () => {
-	it('maps catalog families and Recorder prefix', () => {
+	it('maps catalog families and Recorder ops only', () => {
 		expect(apiScopeOf('getRecorderManager')).toBe('scope.record')
 		expect(apiScopeOf('Recorder.start')).toBe('scope.record')
+		expect(apiScopeOf('Recorder.stop')).toBe('scope.record')
+		// 事件订阅放行（onLoad 注册即调，无隐私面）
+		expect(apiScopeOf('Recorder.onStart')).toBeNull()
+		expect(apiScopeOf('Recorder.offStop')).toBeNull()
 		expect(apiScopeOf('requestSubscribeMessage')).toBe('scope.notification')
 		expect(apiScopeOf('chooseMedia')).toBe('scope.camera')
 		expect(apiScopeOf('chooseVideo')).toBe('scope.camera')

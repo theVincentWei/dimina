@@ -778,6 +778,10 @@ class DiminaActivity : ComponentActivity() {
                 return@withContext
             }
 
+            // 权限声明可达性（2026-11-14 真机修复）：恢复态/存量包的打开不走更新检查，
+            // 打开即对已装包拉一次 manifest 喂声明账本（fire-and-forget，不阻塞启动）。
+            RemoteUpdateManager.refreshPermissionDeclarations(applicationContext, miniProgram)
+
             // 2.读取配置文件 - Only after extraction is complete
             try {
                 val config = readAppConfig("jsapp/$appId")

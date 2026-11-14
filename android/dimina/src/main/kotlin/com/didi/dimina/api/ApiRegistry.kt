@@ -4,6 +4,7 @@ import com.didi.dimina.api.ext.ExtBridgeApi
 import com.didi.dimina.api.ext.ExtCallback
 import com.didi.dimina.api.ext.ExtModuleHandler
 import com.didi.dimina.api.permission.MiniProgramPermissionStore
+import com.didi.dimina.api.permission.PermLog
 import com.didi.dimina.api.permission.PermissionFlow
 import com.didi.dimina.api.permission.PermissionGate
 import com.didi.dimina.common.ApiUtils
@@ -153,13 +154,19 @@ class ApiRegistry {
         val scope = PermissionGate.apiScopeOf(apiName) ?: return null
 
         // camera 源甄别：chooseImage/chooseMedia/chooseVideo 纯相册路径不消耗 scope.camera。
-        if (scope == PermissionGate.SCOPE_CAMERA && !PermissionGate.isCameraSource(params)) return null
+        if (scope == PermissionGate.SCOPE_CAMERA && !PermissionGate.isCameraSource(params)) {
+            PermLog.i("gate", "$appId $apiName pass (album-only source)")
+            return null
+        }
 
         // 网络声明级：本机网关恒放行；外网目标按 origin 比对 manifest network.domains。
         if (scope == PermissionGate.SCOPE_NETWORK) {
-            if (PermissionGate.isUrlAllowed(appId, params.optString("url"))) return null
+            if (PermissionGate.isUrlAllowed(appId, params.optString("url"))) {
+                return null
+            }
             val declared = MiniProgramPermissionStore.networkDomains(appId).isNotEmpty()
             val errMsg = if (declared) "$apiName:fail url not in domain list" else "$apiName:fail permission undeclared"
+            PermLog.i("gate", "$appId $apiName fail: $errMsg")
             return AsyncResult(JSONObject().apply { put("errMsg", errMsg) })
         }
 
@@ -169,10 +176,17 @@ class ApiRegistry {
             urlAllowed = true,
         )
         return when (val decision = PermissionGate.decide(apiName, PermissionGate.scopeLevel(scope), facts)) {
-            PermissionGate.Decision.Pass -> null
-            is PermissionGate.Decision.Fail -> AsyncResult(JSONObject().apply { put("errMsg", decision.errMsg) })
+            PermissionGate.Decision.Pass -> {
+                PermLog.i("gate", "$appId $apiName pass ($scope)")
+                null
+            }
+            is PermissionGate.Decision.Fail -> {
+                PermLog.i("gate", "$appId $apiName fail: ${decision.errMsg}")
+                AsyncResult(JSONObject().apply { put("errMsg", decision.errMsg) })
+            }
             PermissionGate.Decision.Ask -> {
                 // 授权级未授权：弹原生弹窗一次（与 SettingApi.authorize 共用同一动线与记账）。
+                PermLog.i("gate", "$appId $apiName ask ($scope)")
                 PermissionFlow.ensureAuthorized(
                     activity,
                     appId,

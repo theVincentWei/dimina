@@ -54,11 +54,13 @@ internal object PermissionFlow {
     ) {
         when (MiniProgramPermissionStore.consentRecord(appId, scope)?.granted) {
             true -> {
+                PermLog.i("flow", "$appId $scope consented, proceed")
                 onAllowed()
                 return
             }
             false -> {
                 // 宿主管理页显式拒绝位：不再弹窗（管理页是用户的最终意志）。
+                PermLog.i("flow", "$appId $scope explicitly revoked, deny")
                 onDenied()
                 return
             }
@@ -66,10 +68,12 @@ internal object PermissionFlow {
         }
         if (PermissionDialog.isBusy) {
             // 已有授权弹窗在屏：本次调用先 fail，用户重新触发会再次弹（契约「下次再弹」）。
+            PermLog.i("flow", "$appId $scope dialog busy, deny this call")
             onDenied()
             return
         }
         val appName = MiniProgramPermissionStore.displayName(appId)
+        PermLog.i("flow", "$appId $scope show dialog (app=$appName desc=${descFor(appId, scope)})")
         PermissionDialog.show(
             activity = activity,
             appId = appId,

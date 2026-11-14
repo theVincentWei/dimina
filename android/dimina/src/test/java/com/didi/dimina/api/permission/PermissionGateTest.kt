@@ -37,6 +37,11 @@ class PermissionGateTest {
         // 授权级
         assertEquals("scope.record", PermissionGate.apiScopeOf("getRecorderManager"))
         assertEquals("scope.record", PermissionGate.apiScopeOf("Recorder.start"))
+        assertEquals("scope.record", PermissionGate.apiScopeOf("Recorder.stop"))
+        // 录音事件订阅（on/off）无隐私面，不闸（onLoad 注册即调，弹窗会误伤）
+        assertNull(PermissionGate.apiScopeOf("Recorder.onStart"))
+        assertNull(PermissionGate.apiScopeOf("Recorder.offStop"))
+        assertNull(PermissionGate.apiScopeOf("Recorder.onInterruptionBegin"))
         assertEquals("scope.notification", PermissionGate.apiScopeOf("requestSubscribeMessage"))
         // 占位级
         assertEquals("scope.camera", PermissionGate.apiScopeOf("chooseMedia"))

@@ -143,10 +143,19 @@ object MiniProgramPermissionStore {
         fun clear(appId: String)
     }
 
-    /** 声明来源（包内 config.json / assets config.json 的 permissions 段）。 */
+    /**
+     * 声明来源（已装包内文件）。优先 config.json（manifest 安装链路落盘），
+     * 回落 bundle.json（zip/bundle 直装链路，契约 §2 声明段）——两条都缺 = 未声明。
+     */
     internal interface DeclarationSource {
         fun readPermissions(appId: String): JSONObject?
         fun readName(appId: String): String?
+
+        /** 仅 bundle.json 的声明段（zip 自带；manifest 空段抑制 config 通道时仍有效）。 */
+        fun readBundlePermissions(appId: String): JSONObject? = null
+
+        /** 把 manifest 声明补写进已装包 config.json（缺段/不一致才写；文件不存在=无操作）。 */
+        fun backfillPermissions(appId: String, permissions: JSONObject) {}
     }
 
     @Volatile
@@ -177,37 +186,55 @@ object MiniProgramPermissionStore {
     }
 
     /**
-     * 从已装包读声明：jsapp/<appId>/config.json（RemoteUpdateManager.install 时由
-     * writeConfig 写入 permissions 段）；无本地包回落 assets 内置包 config.json。
-     * 形状即 manifest.json 的 permissions 段（写 config 时原样保留）。
+     * 从已装包读声明，两级回落：
+     *  1. jsapp/<appId>/config.json——manifest 安装链路由 writeConfig 落盘的 permissions 段；
+     *  2. jsapp/<appId>/bundle.json——zip/bundle 直装链路（demo 内置包/宿主 installLocalPackage），
+     *     契约 §2 的 bundle.json 声明段（wanqi 严式校验后的 {scope,desc} 形状）。
+     * 本地文件都没有时回落 assets 内置包 config.json。全缺 = 未声明任何敏感能力。
      */
     private object ConfigFileDeclarationSource : DeclarationSource {
         override fun readPermissions(appId: String): JSONObject? {
-            val context = appContext ?: return null
-            val file = java.io.File(context.filesDir, "jsapp/$appId/config.json")
-            val raw = if (file.isFile) {
-                runCatching { file.readText() }.getOrNull()
-            } else {
-                runCatching {
-                    context.assets.open("jsapp/$appId/config.json").bufferedReader().use { it.readText() }
-                }.getOrNull()
-            } ?: return null
-            return runCatching {
-                JSONObject(raw).optJSONObject("permissions")
-            }.getOrNull()
+            readJson(appId, "config.json")?.optJSONObject("permissions")?.let { return it }
+            return readBundlePermissions(appId)
         }
 
-        override fun readName(appId: String): String? {
-            val context = appContext ?: return null
+        override fun readBundlePermissions(appId: String): JSONObject? =
+            readJson(appId, "bundle.json")?.optJSONObject("permissions")
+
+        override fun readName(appId: String): String? =
+            readJson(appId, "config.json")?.optString("name")?.takeIf { it.isNotBlank() }
+
+        /**
+         * 存量补写：旧容器装的包 config.json 没有 permissions 段（writeConfig 的
+         * permissions 落盘路径从未执行过），把最新 manifest 声明补进去——之后离线
+         * 冷启/无 manifestUrl 的打开路径声明仍然可达。assets 内置包改不了文件系统，
+         * 声明留在内存账本（bundle.json 源本身就是它的持久层）。
+         */
+        override fun backfillPermissions(appId: String, permissions: JSONObject) {
+            val context = appContext ?: return
             val file = java.io.File(context.filesDir, "jsapp/$appId/config.json")
+            if (!file.isFile) return
+            runCatching {
+                val config = JSONObject(file.readText())
+                val existing = config.optJSONObject("permissions")
+                if (existing != null && existing.toString() == permissions.toString()) return
+                config.put("permissions", permissions)
+                file.writeText(config.toString())
+                PermLog.i("backfill", "$appId permissions -> config.json (had=${existing != null})")
+            }
+        }
+
+        private fun readJson(appId: String, fileName: String): JSONObject? {
+            val context = appContext ?: return null
+            val file = java.io.File(context.filesDir, "jsapp/$appId/$fileName")
             val raw = if (file.isFile) {
                 runCatching { file.readText() }.getOrNull()
             } else {
                 runCatching {
-                    context.assets.open("jsapp/$appId/config.json").bufferedReader().use { it.readText() }
+                    context.assets.open("jsapp/$appId/$fileName").bufferedReader().use { it.readText() }
                 }.getOrNull()
             } ?: return null
-            return runCatching { JSONObject(raw).optString("name") }.getOrNull()?.takeIf { it.isNotBlank() }
+            return runCatching { JSONObject(raw) }.getOrNull()
         }
     }
 
@@ -282,10 +309,14 @@ object MiniProgramPermissionStore {
 
     private fun declaration(appId: String): Declaration {
         declarationCache[appId]?.let { return it }
-        // 最新一次 manifest 拉取声明为空（老包/新包无段）= manifest 是权威，
-        // 不再回落读 config.json 旧值（权限收回要即时生效）。
         if (manifestSuppressed.contains(appId)) {
-            return Declaration(emptyMap(), emptyList())
+            // 最新 manifest 无段（老包/新包无声明）：config.json（manifest 时代落盘）不可信，
+            // 但 zip 自带的 bundle.json 声明仍有效——demo/bundled 链路根本没有 manifest
+            // 声明通道，不能被空 manifest 连坐。
+            val bundleOnly = ManifestPermissionsParser.parse(declarationSource.readBundlePermissions(appId))
+                ?: Declaration(emptyMap(), emptyList())
+            declarationCache[appId] = bundleOnly
+            return bundleOnly
         }
         val parsed = ManifestPermissionsParser.parse(declarationSource.readPermissions(appId))
         val declaration = parsed ?: Declaration(emptyMap(), emptyList())
@@ -313,10 +344,15 @@ object MiniProgramPermissionStore {
             if (consent.networkDomains != parsed.domains) {
                 writeConsent(appId, consent.copy(networkDomains = parsed.domains))
             }
+            // 存量补写：旧容器装的包 config.json 缺 permissions 段 → 用最新 manifest 声明
+            // 补齐，保证之后离线冷启/恢复态打开（不走 fetchManifest）声明仍可达。
+            if (permissions != null) {
+                declarationSource.backfillPermissions(appId, permissions)
+            }
         }
-        LogUtils.d(
-            TAG,
-            "onManifest($appId): ${parsed?.scopes?.keys ?: "no permissions section"} domains=${parsed?.domains ?: emptyList()}",
+        PermLog.i(
+            "manifest",
+            "$appId scopes=${parsed?.scopes?.keys ?: "none"} domains=${parsed?.domains ?: emptyList()}",
         )
     }
 
