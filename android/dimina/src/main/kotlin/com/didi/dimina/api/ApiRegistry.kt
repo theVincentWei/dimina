@@ -3,8 +3,12 @@ package com.didi.dimina.api
 import com.didi.dimina.api.ext.ExtBridgeApi
 import com.didi.dimina.api.ext.ExtCallback
 import com.didi.dimina.api.ext.ExtModuleHandler
+import com.didi.dimina.api.permission.MiniProgramPermissionStore
+import com.didi.dimina.api.permission.PermissionFlow
+import com.didi.dimina.api.permission.PermissionGate
 import com.didi.dimina.common.ApiUtils
 import com.didi.dimina.common.LogUtils
+import com.didi.dimina.core.MiniApp
 import com.didi.dimina.ui.container.DiminaActivity
 import org.json.JSONObject
 
@@ -87,6 +91,12 @@ class ApiRegistry {
         params: JSONObject,
         responseCallback: (String) -> Unit,
     ): APIResult {
+        // 0. 平台权限守门（契约 v1.0 §3/§4，2026-11-14 冻结）：
+        //    wx.* 预分发闸——查声明 → 查授权 → 放行/弹窗/诚实 fail。
+        //    豁免级（sensors/audio 播放/振动/storage/主题/UI/文件沙盒/局域网族等）
+        //    不在映射表内零改动，勿在此加闸（详见 PermissionGate 头注）。
+        permissionGate(activity, appId, apiName, params, responseCallback)?.let { return it }
+
         // 1. 优先命中已注册的标准 API
         apiHandlers[apiName]?.let { handler ->
             return handler.handleAction(activity, appId, apiName, params, responseCallback)
@@ -118,8 +128,75 @@ class ApiRegistry {
             }
         }
 
+        // 4. 未知 API 显式 fail（审计缺陷②修复：原来静默 NoneResult，JS 回调永不触发；
+        //    errMsg 与 web 侧 `:fail api is not supported` 对齐，JS 侧能收到 fail）。
         LogUtils.e(tag, "API not found: $apiName")
-        return NoneResult()
+        return AsyncResult(JSONObject().apply { put("errMsg", "$apiName:fail api is not supported") })
+    }
+
+    /**
+     * per-appid 平台权限预分发闸。返回 null=放行（继续原有分发）；
+     * 返回非 null=本次调用被闸拦截/已转授权动线，调用方直接返回该结果。
+     *
+     * 判定顺序（契约 §3）：查声明（无声明=诚实 fail `xxx:fail permission undeclared`）
+     * → 查授权（授权级未授权弹原生弹窗一次：拒绝=本次 fail auth deny 下次再弹，
+     * 允许=落盘后放行）→ 放行（声明级/占位级声明过即放行，OS 级检查保留在 handler 内）。
+     */
+    private fun permissionGate(
+        activity: DiminaActivity,
+        appId: String,
+        apiName: String,
+        params: JSONObject,
+        responseCallback: (String) -> Unit,
+    ): APIResult? {
+        MiniProgramPermissionStore.attach(activity.applicationContext)
+        val scope = PermissionGate.apiScopeOf(apiName) ?: return null
+
+        // camera 源甄别：chooseImage/chooseMedia/chooseVideo 纯相册路径不消耗 scope.camera。
+        if (scope == PermissionGate.SCOPE_CAMERA && !PermissionGate.isCameraSource(params)) return null
+
+        // 网络声明级：本机网关恒放行；外网目标按 origin 比对 manifest network.domains。
+        if (scope == PermissionGate.SCOPE_NETWORK) {
+            if (PermissionGate.isUrlAllowed(appId, params.optString("url"))) return null
+            val declared = MiniProgramPermissionStore.networkDomains(appId).isNotEmpty()
+            val errMsg = if (declared) "$apiName:fail url not in domain list" else "$apiName:fail permission undeclared"
+            return AsyncResult(JSONObject().apply { put("errMsg", errMsg) })
+        }
+
+        val facts = PermissionGate.Facts(
+            declared = MiniProgramPermissionStore.isDeclared(appId, scope),
+            consentGranted = MiniProgramPermissionStore.consentRecord(appId, scope)?.granted,
+            urlAllowed = true,
+        )
+        return when (val decision = PermissionGate.decide(apiName, PermissionGate.scopeLevel(scope), facts)) {
+            PermissionGate.Decision.Pass -> null
+            is PermissionGate.Decision.Fail -> AsyncResult(JSONObject().apply { put("errMsg", decision.errMsg) })
+            PermissionGate.Decision.Ask -> {
+                // 授权级未授权：弹原生弹窗一次（与 SettingApi.authorize 共用同一动线与记账）。
+                PermissionFlow.ensureAuthorized(
+                    activity,
+                    appId,
+                    scope,
+                    onAllowed = {
+                        // 允许已落盘，按原参数重新分发到真实 handler（再进闸时直接放行）。
+                        MiniApp.getInstance().invokeAPI(
+                            appId,
+                            activity,
+                            apiName,
+                            params,
+                            null,
+                            responseCallback,
+                        )
+                    },
+                    onDenied = {
+                        val result = JSONObject().apply { put("errMsg", "$apiName:fail auth deny") }
+                        ApiUtils.invokeFail(params, result, responseCallback)
+                        ApiUtils.invokeComplete(params, responseCallback, result)
+                    },
+                )
+                NoneResult()
+            }
+        }
     }
 
     /**

@@ -1,8 +1,9 @@
 package com.didi.dimina.core
 
 import android.content.Context
-import com.didi.dimina.bean.MiniProgram
+import com.didi.dimina.api.permission.MiniProgramPermissionStore
 import com.didi.dimina.api.storage.StorageApi
+import com.didi.dimina.bean.MiniProgram
 import com.didi.dimina.common.AtomicZipInstaller
 import com.didi.dimina.common.LogUtils
 import com.didi.dimina.common.VersionUtils
@@ -244,6 +245,9 @@ object RemoteUpdateManager {
                 clearUserData = clearUserData,
             )
             VersionUtils.removeAppVersion(appId)
+            // per-appid 授权态随卸载清空（授权是给「这个小程序」的，重装重新弹）；
+            // 与 StorageApi.clearAllStorage 的业务数据清算是两个独立动作。
+            MiniProgramPermissionStore.clear(appId)
             if (clearUserData) {
                 StorageApi.clearAllStorage(appId)
             }
@@ -336,7 +340,12 @@ object RemoteUpdateManager {
             val body = response.body?.string().orEmpty()
             val json = JSONObject(body)
             val payload = json.optJSONObject("data") ?: json
-            return RemoteUpdateManifest.fromJson(payload)
+            val manifest = RemoteUpdateManifest.fromJson(payload)
+            // 权限声明通道（契约 §3）：wanqi /apps/<id>/manifest.json 的 permissions 段
+            // （{scopes:[{key,title,usage,mode}],network:{domains}}）喂给容器守门/弹窗。
+            // 所有 fetch 路径（首装/检查更新/autoSync）都过这里，声明随最新 manifest 刷新。
+            MiniProgramPermissionStore.onManifest(manifest.appId, manifest.permissions)
+            return manifest
         }
     }
 
@@ -456,13 +465,17 @@ object RemoteUpdateManager {
 
     private fun writeConfig(manifest: RemoteUpdateManifest, configFile: File) {
         configFile.parentFile?.mkdirs()
-        configFile.writeText(JSONObject().apply {
+        val config = JSONObject().apply {
             put("appId", manifest.appId)
             put("name", manifest.name)
             put("path", manifest.path)
             put("versionCode", manifest.versionCode)
             put("versionName", manifest.versionName)
-        }.toString())
+            // 权限声明随版本落盘（契约 §3）：声明属于这个包版本，离线首启/进程重建时
+            // 守门与弹窗从 config.json 读（MiniProgramPermissionStore.DeclarationSource）。
+            manifest.permissions?.let { put("permissions", it) }
+        }
+        configFile.writeText(config.toString())
     }
 
     private fun pendingAppDirectory(context: Context, appId: String): File {
@@ -542,6 +555,8 @@ object RemoteUpdateManager {
         val versionName: String,
         val packageUrl: String,
         val sha256: String?,
+        /** manifest.json 的 permissions 段（{scopes,network}）；老包无该段=null。 */
+        val permissions: JSONObject?,
     ) {
         companion object {
             fun fromJson(json: JSONObject): RemoteUpdateManifest {
@@ -561,6 +576,7 @@ object RemoteUpdateManager {
                     versionName = json.optString("versionName"),
                     packageUrl = packageUrl,
                     sha256 = json.optString("sha256").ifBlank { null },
+                    permissions = json.optJSONObject("permissions"),
                 )
             }
         }

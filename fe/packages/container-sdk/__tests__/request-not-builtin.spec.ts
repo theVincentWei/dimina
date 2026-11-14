@@ -3,14 +3,15 @@ import { createContainer } from '../src/index.js'
 import { FakeWorker, resetFakeWorker } from './fixtures/fake-worker.js'
 import { installFetchMock } from './fixtures/mock-fetch.js'
 
-// 覆盖即将落地的契约：SDK 不再内置 wx.request 的实现（原实现硬编码了某个 demo
-// 专属的本地代理地址 http://localhost:7788/proxy，不是通用实现，整个从 MiniApp 中删除）。
-// 之后 request 与 scanCode 等其它 API 一样，完全交给宿主通过
-// registerApi('request', handler) 注册；未注册时必须落到 invokeApi 的
-// "不支持" 分支（_handleUnsupportedApi），既不能吞掉调用，也不能发起任何真实网络请求。
+// 覆盖契约：SDK 不内置 wx.request 的实现（原实现硬编码了某个 demo 专属的本地代理地址
+// http://localhost:7788/proxy，不是通用实现，整个从 MiniApp 中删除）。request 与
+// scanCode 等其它 API 一样，完全交给宿主通过 registerApi('request', handler) 注册；
+// 未注册时必须落到 invokeApi 的"不支持"分支（_handleUnsupportedApi），既不能吞掉调用，
+// 也不能发起任何真实网络请求。
 //
-// 本文件写在实现删除之前：第一个用例现在应当是红灯（built-in request 仍存在，
-// 会真的调用 fetch），这是预期状态，不要因为它失败就去"修"它。
+// 平台权限契约 v1.0（2026-11-14）叠加了一层守门：request 属 network.domains 声明级，
+// 本机网关恒放行、外网按声明放行（undeclared → "permission undeclared"）。
+// 本文件的 request 调用一律用 loopback url（恒放行），验证的是守门之后的分发层。
 
 /** 等到指定起始下标之后出现下一个 FakeWorker 实例（对应某次 openApp 起的逻辑线程）。 */
 async function waitForWorker(startIndex: number, timeout = 8000) {
@@ -46,8 +47,8 @@ describe('MiniApp.request 不再是内置实现', () => {
 		document.body.appendChild(mount)
 	})
 
-	// 红灯用例：宿主未 registerApi('request', ...) 时，invokeApi('request', ...) 必须
-	// 走 _handleUnsupportedApi（errMsg 精确对齐现有格式），且绝不能发起真实网络请求。
+	// 契约 1（权限守门 v1.0 §4）：request 是 network.domains 声明级——本机网关恒放行。
+	// 用 loopback url 过闸，验证「未注册 handler → 不支持分支」这一层契约。
 	it('未注册 request handler 时，invokeApi 不发起任何真实网络请求，且必须以 "api is not supported" 失败', async () => {
 		const container = createContainer({ mount })
 		const workerIndexBefore = FakeWorker.instances.length
@@ -56,20 +57,17 @@ describe('MiniApp.request 不再是内置实现', () => {
 
 		// openApp 引导阶段（读取 app-config.json 等）用的是 installFetchMock 装的 fetch；
 		// 从这里开始换一个专属 spy，只关心 request 这次调用是否会打到网络。
-		// 用 mockRejectedValue 而不是"永不 resolve"：万一红灯态下真的走到网络分支，
-		// 也能让 promise 链快速走完 .catch，不留下悬空的未处理 rejection / 慢测试。
 		const fetchSpy = vi.fn().mockRejectedValue(new Error('request 不应该在没有 registerApi 时真正发起网络请求'))
 		globalThis.fetch = fetchSpy
 
 		miniApp.invokeApi('request', {
-			url: 'https://example.com',
+			url: 'http://127.0.0.1:7610/api/v1/apps/wx-request-unsupported',
 			success: 'req-success-id',
 			fail: 'req-fail-id',
 			complete: 'req-complete-id',
 		})
 
-		// 契约 1：不能发起真实网络请求（现在会失败——内置 request 仍然硬编码
-		// fetch('http://localhost:7788/proxy', ...)）。
+		// 契约 1：不能发起真实网络请求。
 		expect(fetchSpy).not.toHaveBeenCalled()
 
 		// 契约 2：必须落到 invokeApi 的"不支持"分支，errMsg 与 _handleUnsupportedApi
@@ -84,9 +82,31 @@ describe('MiniApp.request 不再是内置实现', () => {
 		expect(successCall).toBeUndefined()
 	}, 10000)
 
-	// 对照用例（预期现在就应该是绿灯）：这条不是在验证"移除"本身，而是验证移除之后
-	// request 要走的替代路径——registerApi 优先派发——本来就已经成立，且与其它任意
-	// 已注册 API 的行为完全一致（不需要为 request 另开特例）。
+	// 权限守门契约（v1.0 §4）：未声明 network.domains 时，外网目标在守门层诚实 fail，
+	// 根本不进入「是否注册过 handler」的分发层。
+	it('未声明 network.domains 时，外网请求在守门层以 permission undeclared 失败', async () => {
+		const container = createContainer({ mount })
+		const workerIndexBefore = FakeWorker.instances.length
+		const miniApp = await container.openApp({ appId: 'wx-request-undeclared', path: 'pages/index/index' })
+		await waitForWorker(workerIndexBefore)
+
+		const fetchSpy = vi.fn().mockRejectedValue(new Error('守门拦截后不应触网'))
+		globalThis.fetch = fetchSpy
+
+		miniApp.invokeApi('request', {
+			url: 'https://example.com/api',
+			fail: 'req-fail-id',
+			complete: 'req-complete-id',
+		})
+
+		expect(fetchSpy).not.toHaveBeenCalled()
+		const failMessage = await waitForTriggerCallback(workerIndexBefore, 'req-fail-id', 3000)
+		expect(failMessage.body.args.errMsg).toBe('request:fail permission undeclared')
+	}, 10000)
+
+	// 对照用例：registerApi 优先派发路径本来就已成立，且与其它任意已注册 API 的行为
+	// 完全一致（不需要为 request 另开特例）。守门在分发层之前：loopback url 恒放行
+	// （契约 §4），声明面照旧走到注册的 handler。
 	it('宿主通过 registerApi("request", handler) 注册后，invokeApi 派发给该 handler，行为与任意其它已注册 API 一致，且不触发内置实现或真实网络请求', async () => {
 		const container = createContainer({ mount })
 		const handler = vi.fn()
@@ -99,10 +119,10 @@ describe('MiniApp.request 不再是内置实现', () => {
 		const fetchSpy = vi.fn().mockRejectedValue(new Error('registerApi 命中后不应该再打到网络'))
 		globalThis.fetch = fetchSpy
 
-		miniApp.invokeApi('request', { url: 'https://example.com' })
+		miniApp.invokeApi('request', { url: 'http://127.0.0.1:7610/api/v1/apps/wx-request-registered' })
 
 		expect(handler).toHaveBeenCalledTimes(1)
-		expect(handler).toHaveBeenCalledWith({ url: 'https://example.com' }, undefined)
+		expect(handler).toHaveBeenCalledWith({ url: 'http://127.0.0.1:7610/api/v1/apps/wx-request-registered' }, undefined)
 		expect(fetchSpy).not.toHaveBeenCalled()
 	}, 10000)
 })

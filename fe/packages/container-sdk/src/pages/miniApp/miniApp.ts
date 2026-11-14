@@ -10,6 +10,7 @@ import { WebSocketManager } from '../../core/webSocketManager.js'
 import { readWebCompressedFile, readWebFile, readWebFileData, saveWebFile } from '../../core/webFileSystem.js'
 import { DEFAULT_VIRTUAL_FILE_PREFIX, resolveStorageAdapter } from '../../config.js'
 import { mergePageConfig, queryPath, readFile, sleep, uuid } from '../../utils/util.js'
+import { consentOf, gateApi, LEVEL_AUTHORIZED, manifestPermissions, SCOPE_CATALOG, setManifestPermissions, setScopeGranted, scopeLevel } from './permissionGate.js'
 import { Navigator } from './navigator.js'
 
 // 等待元素上指定 transition property 结束，带超时兜底防止动画未触发时永久阻塞
@@ -734,11 +735,27 @@ export class MiniApp {
 	}
 
 	/**
-	 * 按名称调用 API：自定义注册 → 内置方法 → 第三方扩展路由。
+	 * 按名称调用 API：平台权限守门 → 自定义注册 → 内置方法 → 第三方扩展路由。
 	 * callerBridge 为发起调用的页面 bridge，供 hideHomeButton 这类作用于
 	 * 「调用页自身」的 API 定位页面。
 	 */
 	invokeApi(name: string, params?: Record<string, unknown>, callerBridge?: Bridge): void {
+		// 平台权限守门（契约 v1.0 §3/§4）：映射表 API 先过 per-appid 声明/consent 闸，
+		// 豁免级（storage/主题/UI/文件沙盒等）不在映射表内零改动（勿在此加闸）。
+		const gateParams = params ?? {}
+		const verdict = gateApi(name, gateParams, this.appId, this._getStorageAdapter())
+		if (verdict.handled) {
+			const { onFail, onComplete } = this._createApiCallbacks(gateParams as ApiCallbackOptions)
+			const error = { errMsg: verdict.errMsg }
+			if (gateParams.fail) {
+				onFail?.(error)
+			}
+			else {
+				console.warn(`[container] ${verdict.errMsg}`)
+			}
+			onComplete?.()
+			return
+		}
 		const handler = this.apiRegistry[name]
 		if (handler) {
 			handler.call(this, params, callerBridge)
@@ -834,6 +851,15 @@ export class MiniApp {
 			this.appConfig = JSON.parse(configContent)
 			this.runtimeType = this.appConfig?.app?.runtimeType === 'game' ? 'game' : 'miniProgram'
 			this.el.classList.toggle('dimina-native-view--game', this.runtimeType === 'game')
+
+			// 权限声明通道（契约 v1.0 §3）：启动拉 <resourceBaseUrl><appId>/manifest.json，
+			// wanqi 侧 permissions 段（{scopes:[{key,title,usage,mode}],network:{domains}}）
+			// 喂给守门与 getSetting；老包/本地 dev 404 = 未声明（守门诚实 fail）。
+			// fire-and-forget：不阻塞启动，缺 manifest 不是错误。
+			fetch(`${this.getResourceBaseUrl()}${this.appInfo.appId}/manifest.json`)
+				.then(response => response.ok ? response.json() : null)
+				.then(manifest => setManifestPermissions(this.appId, manifest))
+				.catch(() => { /* 无声明：按老包处理 */ })
 
 			// 缓存 tabBar 配置（list、color 等），并渲染 tabBar 容器；后续仅做选中态/可见性切换
 			this._initTabBar()
@@ -3423,24 +3449,52 @@ export class MiniApp {
 		return sentinel ? sentinel.release() : Promise.resolve()
 	}
 
+	/**
+	 * getSetting：authSetting = 冻结目录（契约 §1，scope.userLocation 摘除）的容器
+	 * per-appid 位在前、浏览器位在后。授权级读 consent；声明级/占位级读 manifest 声明；
+	 * scope.record 额外要求浏览器麦克风位（用户可在浏览器回收）。
+	 */
 	async getSetting(opts: ApiCallbackOptions = {}): Promise<void> {
 		const { onSuccess, onComplete } = this._createApiCallbacks(opts)
-		const authSetting: Record<string, boolean> = {}
+		const adapter = this._getStorageAdapter()
+		const manifest = manifestPermissions(this.appId)
 		const permissions = (navigator as unknown as { permissions?: Permissions }).permissions
-		for (const [scope, name] of [
-			['scope.camera', 'camera'],
-			['scope.record', 'microphone'],
-			['scope.userLocation', 'geolocation'],
-		] as const) {
+		const queryGranted = async (name: string): Promise<boolean> => {
 			try {
-				authSetting[scope] = (await permissions?.query({ name } as PermissionDescriptor))?.state === 'granted'
+				return (await permissions?.query({ name } as PermissionDescriptor))?.state === 'granted'
 			}
-			catch { authSetting[scope] = false }
+			catch { return false }
+		}
+		const authSetting: Record<string, boolean> = {}
+		for (const [scope, level] of Object.entries(SCOPE_CATALOG)) {
+			if (scope === 'scope.userLocation') {
+				// v1 诚实不可用：getLocation 未实现，摘出支持面（不再出现在 authSetting）。
+				continue
+			}
+			if (level === LEVEL_AUTHORIZED) {
+				const consented = consentOf(this.appId, scope, adapter) === true
+				authSetting[scope] = scope === 'scope.record'
+					? consented && await queryGranted('microphone')
+					: consented
+			}
+			else if (scope === 'network.external') {
+				authSetting[scope] = (manifest?.domains.length ?? 0) > 0
+			}
+			else {
+				authSetting[scope] = Boolean(manifest?.scopes[scope])
+			}
 		}
 		const result = { authSetting, errMsg: 'getSetting:ok' }
 		onSuccess?.(result); onComplete?.(result)
 	}
 
+	/**
+	 * authorize：支持面=冻结目录（scope.userLocation 摘除，调用 fail not supported——
+	 * 审计缺陷①）。声明闸先行（未声明=诚实 fail permission undeclared）；
+	 * scope.camera/record 走浏览器 getUserMedia 探活（浏览器位在后，成功落容器 consent）；
+	 * notification/clipboard 无浏览器授权面，容器 consent 即终态；
+	 * bluetooth/contacts/writePhotosAlbum web 无授权面无实现，诚实 fail。
+	 */
 	authorize(opts: ApiCallbackOptions & { scope?: string }): void {
 		const { onSuccess, onFail, onComplete } = this._createApiCallbacks(opts)
 		const settle = (granted: boolean, reason = 'auth deny') => {
@@ -3448,25 +3502,53 @@ export class MiniApp {
 			if (granted) onSuccess?.(result); else onFail?.(result)
 			onComplete?.(result)
 		}
-		if (opts.scope === 'scope.camera' || opts.scope === 'scope.record') {
+		const scope = opts.scope ?? ''
+		if (scope === 'scope.userLocation') {
+			settle(false, 'not supported')
+			return
+		}
+		const level = scopeLevel(scope)
+		if (!level) {
+			settle(false, 'invalid scope')
+			return
+		}
+		const adapter = this._getStorageAdapter()
+		const manifest = manifestPermissions(this.appId)
+		if (scope === 'network.external') {
+			if ((manifest?.domains.length ?? 0) === 0) {
+				settle(false, 'permission undeclared')
+				return
+			}
+			settle(true)
+			return
+		}
+		if (!manifest?.scopes[scope]) {
+			settle(false, 'permission undeclared')
+			return
+		}
+		if (scope === 'scope.camera' || scope === 'scope.record') {
 			if (!navigator.mediaDevices?.getUserMedia) {
 				settle(false, 'media permission is not supported')
 				return
 			}
 			navigator.mediaDevices.getUserMedia({
-				video: opts.scope === 'scope.camera',
-				audio: opts.scope === 'scope.record',
+				video: scope === 'scope.camera',
+				audio: scope === 'scope.record',
 			}).then((stream) => {
 				stream.getTracks().forEach(track => track.stop())
+				setScopeGranted(this.appId, scope, true, adapter)
 				settle(true)
 			}).catch(error => settle(false, getErrorMessage(error)))
 			return
 		}
-		if (opts.scope === 'scope.userLocation' && navigator.geolocation) {
-			navigator.geolocation.getCurrentPosition(() => settle(true), error => settle(false, error.message))
+		if (scope === 'scope.notification' || scope === 'scope.clipboard') {
+			if (scope === 'scope.notification') {
+				setScopeGranted(this.appId, scope, true, adapter)
+			}
+			settle(true)
 			return
 		}
-		settle(false, 'scope is not supported on Web')
+		settle(false, 'not supported on web')
 	}
 
 	private _resolveMediaUrl(source: string): string {

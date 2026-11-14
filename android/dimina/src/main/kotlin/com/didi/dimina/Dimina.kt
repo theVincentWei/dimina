@@ -12,6 +12,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.didi.dimina.api.ext.ExtModuleHandler
+import com.didi.dimina.api.permission.MiniProgramPermissionStore
 import com.didi.dimina.bean.MiniProgram
 import com.didi.dimina.common.LogUtils
 import com.didi.dimina.common.PathUtils
@@ -242,6 +243,9 @@ class Dimina private constructor(context: Context) {
     init {
         // 基础初始化逻辑
         setupCoreComponents()
+        // 平台权限账本（契约 v1.0 §3）：SDK 初始化即挂 application context，
+        // 宿主 ext module（dsh-permissions）无需等容器首启即可 state()/set()。
+        MiniProgramPermissionStore.attach(appContext)
     }
 
     // 初始化核心组件
