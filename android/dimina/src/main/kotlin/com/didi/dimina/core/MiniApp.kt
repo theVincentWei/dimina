@@ -165,6 +165,13 @@ class MiniApp private constructor() {
     internal fun notifyFloated(appId: String, appName: String, iconPng: ByteArray?) =
         notifyLifecycle { it.onFloated(appId, appName, iconPng) }
 
+    /**
+     * 「问AI浮窗」点击(2026-11-15)外发:与 notifyFloated 同一条生命周期链路,
+     * payload=(appId, appName, pageTitle, pagePath),页面上下文拿不到为 null。
+     */
+    internal fun notifyAskAiInvoked(appId: String, appName: String, pageTitle: String?, pagePath: String?) =
+        notifyLifecycle { it.onAskAiInvoked(appId, appName, pageTitle, pagePath) }
+
     /** 小程序回到前台(浮窗恢复/桌面重开)时回调,宿主据此收起浮窗球。 */
     internal fun notifyForegrounded(appId: String) =
         notifyLifecycle { it.onForegrounded(appId) }

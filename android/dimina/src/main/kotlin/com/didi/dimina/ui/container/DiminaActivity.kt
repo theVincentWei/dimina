@@ -99,6 +99,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.asImageBitmap
@@ -139,6 +140,7 @@ import com.didi.dimina.common.MenuButtonLayout
 import com.didi.dimina.common.PathUtils
 import com.didi.dimina.common.Utils
 import com.didi.dimina.common.VersionUtils
+import com.didi.dimina.core.AskAiEventPayload
 import com.didi.dimina.core.Bridge
 import com.didi.dimina.core.MiniApp
 import com.didi.dimina.core.PageStateTeardown
@@ -1979,6 +1981,9 @@ class DiminaActivity : ComponentActivity() {
         shellReady: State<Boolean>,
         modifier: Modifier = Modifier,
     ) {
+        // 「问AI浮窗」入口状态(2026-11-15):浮窗渲染、⋯菜单瓦片亮/置灰、瓦片 toggle
+        // 都读这一个可观察源(Dimina 单例持有,跨 DiminaActivity 实例一致)。
+        val askAiEntryState = com.didi.dimina.Dimina.getInstance().askAiEntryState()
         if (showActionSheet.value) {
             ActionSheet(
                 buttonLabelsColor = actionTextColor,
@@ -2002,6 +2007,14 @@ class DiminaActivity : ComponentActivity() {
                 iconPng = miniProgram.iconPng,
                 versionName = miniProgram.versionName,
                 versionCode = miniProgram.versionCode,
+                askAiFloatVisible = askAiEntryState.visible,
+                onAskAiTileClick = {
+                    showMiniProgramMenu.value = false
+                    // 「问AI浮窗」瓦片=开关(2026-11-15):toggle 同一持久化状态,
+                    // 浮窗渲染与亮/置灰跟随 askAiEntryState.visible。
+                    com.didi.dimina.Dimina.getInstance()
+                        .setAskAiFloatEnabled(!askAiEntryState.visible)
+                },
                 onReenterClick = {
                     showMiniProgramMenu.value = false
                     reenterMiniProgram()
@@ -2400,6 +2413,20 @@ class DiminaActivity : ComponentActivity() {
                     )
                 }
             }
+
+            // 「问AI浮窗」(2026-11-15 定稿):宿主级产品入口,显隐跟随全局持久化开关
+            // dimina_ask_ai_float_enabled(⋯菜单「问AI浮窗」瓦片与长按 ✕ 写同一状态),
+            // 不随胶囊收起/隐藏。点击=透传宿主 onClick + 经 onAskAiInvoked 外发事件;
+            // ✕=持久化关闭。zIndex 20f 压过胶囊(10f)与通知入口。
+            if (askAiEntryState.visible) {
+                AskAiFloatButton(
+                    onClick = { onAskAiFloatClicked() },
+                    onClose = { com.didi.dimina.Dimina.getInstance().setAskAiFloatEnabled(false) },
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .zIndex(20f),
+                )
+            }
         }
     }
 
@@ -2430,6 +2457,24 @@ class DiminaActivity : ComponentActivity() {
         // 浮窗(2026-11-12):整栈收后台成功,通知宿主显示浮窗球(带图标)。
         MiniApp.getInstance()
             .notifyFloated(miniProgram.appId, miniProgram.name, miniProgram.iconPng)
+    }
+
+    /**
+     * 「问AI浮窗」点击(2026-11-15):两条宿主通道同时走——
+     * ① 宿主经 Dimina.setOnAskAiEntryClick 注入的 onClick(建议 open 前设置);
+     * ② 经 MiniProgramLifecycleListener.onAskAiInvoked 外发事件(notifyFloated
+     *    同一条链路),payload=(appId, appName, pageTitle, pagePath):
+     *    pageTitle=当前 navigationBarTitle、pagePath=当前页 path,blank 归一 null
+     *    不强造;appName 与 ⋯菜单同源(包名空回落标题再落「小程序」)。
+     * 收小程序由宿主收到事件后调 Dimina.floatCurrentMiniProgram(),此处不主动收。
+     */
+    private fun onAskAiFloatClicked() {
+        val title = navigationBarTitle.value
+        val (pageTitle, pagePath) = AskAiEventPayload.normalizePageContext(title, currentPagePath.value)
+        val appName = miniProgram.name.ifBlank { title.ifBlank { "小程序" } }
+        Dimina.getInstance().askAiEntryState().onClick?.invoke()
+        MiniApp.getInstance()
+            .notifyAskAiInvoked(miniProgram.appId, appName, pageTitle, pagePath)
     }
 
     private fun closeMiniProgram() {
@@ -2689,6 +2734,8 @@ class DiminaActivity : ComponentActivity() {
         iconPng: ByteArray?,
         versionName: String,
         versionCode: Int,
+        askAiFloatVisible: Boolean,
+        onAskAiTileClick: () -> Unit,
         onFloatClick: () -> Unit,
         onReenterClick: () -> Unit,
         onCloseClick: () -> Unit,
@@ -2792,6 +2839,16 @@ class DiminaActivity : ComponentActivity() {
                         .padding(horizontal = 24.dp, vertical = 20.dp),
                     horizontalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
+                    // 「问AI浮窗」开关瓦片(2026-11-15)置第一位:图标=浮窗本体缩微,
+                    // 亮=浮窗显示中、整图标置灰=已关闭,点击 toggle 同一持久化状态。
+                    MiniProgramAskAiMenuTile(
+                        floatVisible = askAiFloatVisible,
+                        dark = dark,
+                        tileBackground = sheetTileBg,
+                        labelColor = sheetTileLabel,
+                        onClick = onAskAiTileClick,
+                        modifier = Modifier.width(78.dp)
+                    )
                     MiniProgramMenuItem(
                         label = "浮窗",
                         icon = FloatWindowIcon,
@@ -3487,6 +3544,24 @@ class DiminaActivity : ComponentActivity() {
             return true
         }
 
+        /**
+         * 宿主把「当前前台小程序」收后台(2026-11-15 问AI链路):复用 ⋯菜单「浮窗」
+         * 走的 [DiminaActivity.hideMiniProgram] 原语(整栈保留+运行时保留+notifyFloated),
+         * 宿主随后可用 startMiniProgram 原地恢复。多任务并行时取仍在前台的最后一个。
+         * 必须主线程调用;没有前台小程序返回 false。
+         */
+        @androidx.annotation.MainThread
+        internal fun floatCurrentMiniProgramFromHost(): Boolean {
+            val appId = foregroundMiniProgramAppId() ?: return false
+            val activity = activityRegistry.lastRegistered(appId) ?: return false
+            activity.hideMiniProgram()
+            return true
+        }
+
+        /** 当前仍在前台的小程序 appId;多任务并行时取最后可见者,无则 null。 */
+        private fun foregroundMiniProgramAppId(): String? =
+            visibilityTracker.foregroundAppIds().lastOrNull()
+
         fun launch(
             context: Context,
             miniProgram: MiniProgram,
@@ -3581,8 +3656,9 @@ class DiminaActivity : ComponentActivity() {
 }
 
 /**
- * 「浮窗」宫格图标（2026-11-12）：窗口描边 + 左下小窗（PiP 语义）。
- * material-icons-core 没有现成的画中画/浮窗字形，手绘一枚，跟随宫格 tint。
+ * 「浮窗」宫格图标（2026-11-15 拍板换「窗中窗」）：粗笔画窗描边 + 右下实心小窗
+ * （微信浮窗同语义）。旧版细线画中画（2026-11-12）在深色瓦片上几乎不可辨，
+ * 用户反馈「没有图标」。EvenOdd fill 环等效 stroke 2，与 Refresh/Close 重量一致。
  */
 private val FloatWindowIcon: ImageVector = ImageVector.Builder(
     name = "FloatWindow",
@@ -3591,34 +3667,43 @@ private val FloatWindowIcon: ImageVector = ImageVector.Builder(
     viewportWidth = 24f,
     viewportHeight = 24f,
 ).path(
+    // fill 画笔必须有：ImageVector path 无 brush 时 Compose 零渲染（Icon 的 tint
+    // 只是 ColorFilter，救不了没有画笔的 path）——这正是旧版细线框「从未显示」的
+    // 根因（2026-11-15 真机像素统计证实）。占位黑色由 Icon tint 统一染成瓦片色。
+    fill = SolidColor(Color(0xFF000000)),
     pathFillType = PathFillType.EvenOdd,
 ) {
-        // 外圈:圆角矩形 (3,4)-(21,18) r=2
-        moveTo(5f, 4f)
-        horizontalLineTo(19f)
-        arcToRelative(2f, 2f, 0f, false, true, 2f, 2f)
-        verticalLineTo(16f)
-        arcToRelative(2f, 2f, 0f, false, true, -2f, 2f)
-        horizontalLineTo(5f)
-        arcToRelative(2f, 2f, 0f, false, true, -2f, -2f)
-        verticalLineTo(6f)
-        arcToRelative(2f, 2f, 0f, false, true, 2f, -2f)
+        // 外窗环:外缘圆角矩形 (3,4.5)-(21,18.5) r2.4
+        moveTo(5.4f, 4.5f)
+        horizontalLineTo(18.6f)
+        arcToRelative(2.4f, 2.4f, 0f, false, true, 2.4f, 2.4f)
+        verticalLineTo(16.1f)
+        arcToRelative(2.4f, 2.4f, 0f, false, true, -2.4f, 2.4f)
+        horizontalLineTo(5.4f)
+        arcToRelative(2.4f, 2.4f, 0f, false, true, -2.4f, -2.4f)
+        verticalLineTo(6.9f)
+        arcToRelative(2.4f, 2.4f, 0f, false, true, 2.4f, -2.4f)
         close()
-        // 内孔:挖空成描边环
-        moveTo(6.6f, 5.6f)
-        horizontalLineTo(17.4f)
-        arcToRelative(0.9f, 0.9f, 0f, false, true, 0.9f, 0.9f)
-        verticalLineTo(15.5f)
-        arcToRelative(0.9f, 0.9f, 0f, false, true, -0.9f, 0.9f)
-        horizontalLineTo(6.6f)
-        arcToRelative(0.9f, 0.9f, 0f, false, true, -0.9f, -0.9f)
-        verticalLineTo(6.5f)
-        arcToRelative(0.9f, 0.9f, 0f, false, true, 0.9f, -0.9f)
+        // 内缘:挖空成粗描边环 (4,5.5)-(20,17.5) r1.4
+        moveTo(5.4f, 5.5f)
+        horizontalLineTo(18.6f)
+        arcToRelative(1.4f, 1.4f, 0f, false, true, 1.4f, 1.4f)
+        verticalLineTo(16.1f)
+        arcToRelative(1.4f, 1.4f, 0f, false, true, -1.4f, 1.4f)
+        horizontalLineTo(5.4f)
+        arcToRelative(1.4f, 1.4f, 0f, false, true, -1.4f, -1.4f)
+        verticalLineTo(6.9f)
+        arcToRelative(1.4f, 1.4f, 0f, false, true, 1.4f, -1.4f)
         close()
-        // 左下小窗:even-odd 在孔内重新填充
-        moveTo(6.5f, 10.5f)
-        horizontalLineTo(11f)
-        verticalLineTo(15f)
-        horizontalLineTo(6.5f)
+        // 右下实心小窗:(12,10.5)-(19.2,16.7) r1.4
+        moveTo(13.4f, 10.5f)
+        horizontalLineTo(17.8f)
+        arcToRelative(1.4f, 1.4f, 0f, false, true, 1.4f, 1.4f)
+        verticalLineTo(15.3f)
+        arcToRelative(1.4f, 1.4f, 0f, false, true, -1.4f, 1.4f)
+        horizontalLineTo(13.4f)
+        arcToRelative(1.4f, 1.4f, 0f, false, true, -1.4f, -1.4f)
+        verticalLineTo(11.9f)
+        arcToRelative(1.4f, 1.4f, 0f, false, true, 1.4f, -1.4f)
         close()
 }.build()

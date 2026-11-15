@@ -49,4 +49,12 @@ internal class MiniProgramVisibilityTracker<T> {
     /** [appId] 名下当前是否还有可见的 Activity。 */
     @Synchronized
     fun isForeground(appId: String): Boolean = !visibleActivities[appId].isNullOrEmpty()
+
+    /**
+     * 当前仍在前台的小程序 appId 列表（按其 Activity 的可见登记顺序）。
+     * 「问AI浮窗」的 floatCurrentMiniProgram 用它定位宿主要收后台的那个：
+     * 多任务并行时通常只有一个，取 [lastOrNull] 即最近可见者。
+     */
+    @Synchronized
+    fun foregroundAppIds(): List<String> = visibleActivities.keys.toList()
 }

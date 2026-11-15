@@ -47,6 +47,26 @@ internal class NotifyEntryState {
 }
 
 /**
+ * 「问AI浮窗」入口状态（2026-11-15，模式仿 [NotifyEntryState]）。
+ *
+ * - [visible]：浮窗是否显示 = 全局持久化开关
+ *   `dimina_ask_ai_float_enabled`（[com.didi.dimina.common.AskAiFloatStore]，默认 true），
+ *   init 时读盘，长按 ✕ 与 ⋯菜单瓦片经 [Dimina.setAskAiFloatEnabled] 写回并同步本状态；
+ *   容器 Compose 树据此渲染/摘除浮窗、⋯菜单瓦片据此切换亮/置灰。
+ * - [onClick]：宿主在 startMiniProgram 前经 [Dimina.setOnAskAiEntryClick] 注入；
+ *   浮窗被点击时容器透传它，并同时经
+ *   [com.didi.dimina.core.MiniProgramLifecycleListener.onAskAiInvoked] 外发事件。
+ *   未注入时点击只外发事件（对不接问AI的其它嵌入方零影响）。
+ */
+internal class AskAiEntryState {
+    var visible by mutableStateOf(true)
+        internal set
+
+    var onClick by mutableStateOf<(() -> Unit)?>(null)
+        internal set
+}
+
+/**
  * Author: Doslin
  */
 class Dimina private constructor(context: Context) {
@@ -240,12 +260,19 @@ class Dimina private constructor(context: Context) {
     private val operationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private lateinit var config: DiminaConfig
 
+    // 「问AI浮窗」入口状态(2026-11-15):须先于 init 块声明——init 要按持久化开关同步 visible。
+    private val askAiEntryStateImpl = AskAiEntryState()
+
     init {
         // 基础初始化逻辑
         setupCoreComponents()
         // 平台权限账本（契约 v1.0 §3）：SDK 初始化即挂 application context，
         // 宿主 ext module（dsh-permissions）无需等容器首启即可 state()/set()。
         MiniProgramPermissionStore.attach(appContext)
+        // 「问AI浮窗」显隐跟随全局持久化开关（默认 true）：init 即读盘同步，
+        // 后续长按 ✕ / ⋯菜单瓦片经 setAskAiFloatEnabled 写回。
+        askAiEntryStateImpl.visible =
+            com.didi.dimina.common.AskAiFloatStore.readEnabled(appContext)
     }
 
     // 初始化核心组件
@@ -426,6 +453,47 @@ class Dimina private constructor(context: Context) {
         if (Looper.myLooper() == Looper.getMainLooper()) block()
         else Handler(Looper.getMainLooper()).post(block)
     }
+
+    // ---- 容器「问AI浮窗」入口（2026-11-15，壳同 notifyEntry 机制） ----
+
+    /** 容器 Compose 树读取问AI浮窗入口状态（显隐跟随持久化开关）。 */
+    internal fun askAiEntryState(): AskAiEntryState = askAiEntryStateImpl
+
+    /**
+     * 设置「问AI浮窗」的点击回调。打开问AI聊天是宿主的事情，容器只把点击透传出来；
+     * 同时容器会经 [com.didi.dimina.core.MiniProgramLifecycleListener.onAskAiInvoked]
+     * 外发带页面上下文的事件（payload: appId/appName/pageTitle/pagePath），宿主可任选
+     * 一条（或两条都接）消费。传 `null` 清除回调，此时点击只外发事件。
+     * 建议在 [startMiniProgram] 前设置。
+     */
+    fun setOnAskAiEntryClick(callback: (() -> Unit)?) {
+        runOnMainThread { askAiEntryStateImpl.onClick = callback }
+    }
+
+    /**
+     * 写「问AI浮窗」显隐开关：持久化到全局 SharedPreferences key
+     * `dimina_ask_ai_float_enabled` 并同步容器内可观察状态（浮窗渲染/菜单瓦片
+     * 亮置灰跟着变）。长按 ✕ 关闭与 ⋯菜单瓦片 toggle 都走这里，同一状态。
+     */
+    internal fun setAskAiFloatEnabled(enabled: Boolean) {
+        runOnMainThread {
+            com.didi.dimina.common.AskAiFloatStore.writeEnabled(appContext, enabled)
+            askAiEntryStateImpl.visible = enabled
+        }
+    }
+
+    /**
+     * 把当前前台小程序收后台（2026-11-15 问AI链路）：复用 ⋯菜单「浮窗」的
+     * hideMiniProgram 原语，整栈保留+运行时保留，宿主可随后用
+     * [startMiniProgram] 原地恢复。宿主收到 [com.didi.dimina.core.MiniProgramLifecycleListener.onAskAiInvoked]
+     * 后调它收起小程序，腾出屏幕给问AI聊天。
+     *
+     * 必须在主线程调用。多任务并行时取仍在前台的那个小程序。
+     *
+     * @return 是否成功收后台；没有前台小程序（已收起/未运行）返回 `false`。
+     */
+    @MainThread
+    fun floatCurrentMiniProgram(): Boolean = DiminaActivity.floatCurrentMiniProgramFromHost()
 
     /** Queries installed disk contents, not whether a runtime is currently alive. */
     fun isExistsApp(appId: String): Boolean = getAppVersionInfo(appId) != null
