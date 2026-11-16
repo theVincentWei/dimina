@@ -392,6 +392,16 @@ public class DMPAppManager {
         }
     }
 
+    /// Public host-facing close (dsh-go iOS bridge `dsh/dimina` "close"): the
+    /// Android SDK exposes closeMiniProgram(appId) on its public Dimina facade;
+    /// keep parity so hosts don't reach into internals.
+    @MainActor
+    public func closeMiniProgram(appId: String) async -> Bool {
+        guard let app = existApp(appId: appId) else { return false }
+        await closeMiniProgram(app)
+        return true
+    }
+
     @discardableResult
     private func removeOpenerContext(for targetAppIndex: Int) -> MiniProgramOpenerContext? {
         return withStateLock {

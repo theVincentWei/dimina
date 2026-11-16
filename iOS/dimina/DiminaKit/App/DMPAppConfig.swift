@@ -11,9 +11,11 @@ public struct DMPAppConfig : Identifiable {
     var appName: String
     var appId: String
 
-    var path: String?
-    var versionCode: Int?
-    var versionName: String?
+    /// Public for host apps (dsh-go iOS bridge): the Android MiniProgram contract
+    /// exposes path/versionCode/versionName; keep parity so hosts can drive installs.
+    public var path: String?
+    public var versionCode: Int?
+    public var versionName: String?
     public var updateManifestUrl: String?
     public var isDebugMode: Bool = false
 
