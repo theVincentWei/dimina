@@ -12,5 +12,10 @@ public enum DMPLogger {
         let message = items.map { String(describing: $0) }.joined(separator: separator)
         Swift.print(message, terminator: terminator)
         #endif
+        // Host-visible diagnostics (syslog): release builds compile print out,
+        // so launch/bridge traces were invisible to hosts driving the container
+        // remotely. NSLog lands in the unified log and streams via syslog.
+        let message = items.map { String(describing: $0) }.joined(separator: separator)
+        NSLog("%@", "[DMP] \(message)")
     }
 }
