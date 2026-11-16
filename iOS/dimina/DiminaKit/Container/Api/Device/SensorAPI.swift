@@ -327,7 +327,7 @@ public final class SensorAPI: DMPContainerApi {
         }
 
         manager.deviceMotionUpdateInterval = desiredInterval
-        manager.startDeviceMotionUpdates(to: motionQueue(appId: appId), using: referenceFrame) { motion, error in
+        manager.startDeviceMotionUpdates(using: referenceFrame, to: motionQueue(appId: appId), withHandler: { motion, error in
             if let error {
                 DMPLogger.debug("SensorAPI \(appId) motion error: \(error.localizedDescription)")
                 return
@@ -356,7 +356,7 @@ public final class SensorAPI: DMPContainerApi {
                 "beta": motion.attitude.pitch * SensorAPI.radiansToDegrees,
                 "gamma": motion.attitude.roll * SensorAPI.radiansToDegrees,
             ])
-        }
+        })
     }
 
     private static func acquireMotionManager(appId: String) -> CMMotionManager {
