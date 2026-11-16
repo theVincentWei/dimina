@@ -283,7 +283,7 @@ final class DMPGameTouchNativeRelay: UIGestureRecognizer, UIGestureRecognizerDel
 
     // MARK: 触摸捕获 → DOM 语义快照
 
-    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
         super.touchesBegan(touches, with: event)
         guard !disposed, hostWebView != nil else { return }
         // touchesBegan 的 touches = 本次新增的触点（对应安卓 ACTION_DOWN/POINTER_DOWN）。
@@ -295,14 +295,14 @@ final class DMPGameTouchNativeRelay: UIGestureRecognizer, UIGestureRecognizerDel
         offer("touchstart", changedTouches: touches, excludeFromAll: [])
     }
 
-    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
         super.touchesMoved(touches, with: event)
         guard !disposed, hostWebView != nil else { return }
         if state == .began { state = .changed }
         offer("touchmove", changedTouches: touches, excludeFromAll: [])
     }
 
-    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
         super.touchesEnded(touches, with: event)
         guard !disposed, hostWebView != nil else { return }
         offer("touchend", changedTouches: touches, excludeFromAll: touches)
@@ -311,7 +311,7 @@ final class DMPGameTouchNativeRelay: UIGestureRecognizer, UIGestureRecognizerDel
         // 仍有触点在屏（多指先后抬起）：保持 .changed，快路继续观察剩余序列。
     }
 
-    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
         super.touchesCancelled(touches, with: event)
         guard !disposed, hostWebView != nil else { return }
         offer("touchcancel", changedTouches: touches, excludeFromAll: touches)
