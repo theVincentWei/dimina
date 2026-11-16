@@ -181,11 +181,9 @@ private final class TCPWifiBindState {
         self.appId = appId
         self.socketId = socketId
         queue = DispatchQueue(label: "com.didi.dimina.tcp-wifi.\(appId)")
-        let parameters = NWParameters()
-        parameters.requiredInterfaceType = .wifi
-        // NWPathMonitor 不收 NWParameters:用 requiredInterfaceTypes 专盯 WiFi 路径。
-        let _ = parameters
-        monitor = NWPathMonitor(requiredInterfaceTypes: [.wifi])
+        // NWPathMonitor 在 iOS 14 部署目标可用面里没有 requiredInterfaceTypes(iOS 17.4+),
+        // 用无约束监视器:handleWifiPath 侧自判 usesInterfaceType(.wifi),语义等价。
+        monitor = NWPathMonitor()
     }
 
     func start(onUpdate: @escaping (NWPath) -> Void) {
