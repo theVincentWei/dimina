@@ -183,7 +183,9 @@ private final class TCPWifiBindState {
         queue = DispatchQueue(label: "com.didi.dimina.tcp-wifi.\(appId)")
         let parameters = NWParameters()
         parameters.requiredInterfaceType = .wifi
-        monitor = NWPathMonitor(parameters: parameters)
+        // NWPathMonitor 不收 NWParameters:用 requiredInterfaceTypes 专盯 WiFi 路径。
+        let _ = parameters
+        monitor = NWPathMonitor(requiredInterfaceTypes: [.wifi])
     }
 
     func start(onUpdate: @escaping (NWPath) -> Void) {
@@ -633,7 +635,7 @@ final class LocalNetworkAPIManager {
     private func handleWifiPath(bind: TCPWifiBindState, state: IOSTCPSocketState, path: NWPath) {
         let satisfied = path.status == .satisfied && path.usesInterfaceType(.wifi)
         if satisfied, let interface = path.availableInterfaces.first(where: { $0.type == .wifi }) {
-            bind.setInterfaceIndex(interface.index)
+            bind.setInterfaceIndex(UInt32(interface.index))
         }
         bind.announcePath()
         guard let reportedSatisfied = bind.reportTransition(satisfied: satisfied) else { return }
