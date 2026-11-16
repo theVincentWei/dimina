@@ -1,5 +1,6 @@
 import CoreBluetooth
 import Foundation
+import UIKit
 
 /** WeChat-compatible Bluetooth adapter and BLE central API bridge. */
 public final class BluetoothAPI: DMPContainerApi {
@@ -35,6 +36,7 @@ public final class BluetoothAPI: DMPContainerApi {
     @BridgeMethod("offBLECharacteristicValueChange") var offBLECharacteristicValueChange: DMPBridgeMethodHandler = { bridge("offBLECharacteristicValueChange", $0, $1, $2) }
     @BridgeMethod("onBLEMTUChange") var onBLEMTUChange: DMPBridgeMethodHandler = { bridge("onBLEMTUChange", $0, $1, $2) }
     @BridgeMethod("offBLEMTUChange") var offBLEMTUChange: DMPBridgeMethodHandler = { bridge("offBLEMTUChange", $0, $1, $2) }
+    @BridgeMethod("openSystemBluetoothSetting") var openSystemBluetoothSetting: DMPBridgeMethodHandler = { bridge("openSystemBluetoothSetting", $0, $1, $2) }
     @BridgeMethod("isBluetoothDevicePaired") var isBluetoothDevicePaired: DMPBridgeMethodHandler = { bridge("isBluetoothDevicePaired", $0, $1, $2) }
     @BridgeMethod("makeBluetoothPair") var makeBluetoothPair: DMPBridgeMethodHandler = { bridge("makeBluetoothPair", $0, $1, $2) }
 }
@@ -90,8 +92,9 @@ final class BluetoothAPIManager: NSObject, CBCentralManagerDelegate, CBPeriphera
             case "notifyBLECharacteristicValueChange": self.setNotification(data: data, appId: appId, callback: callback)
             case "getBLEDeviceRSSI": self.getRSSI(data: data, appId: appId, callback: callback)
             case "getBLEMTU": self.getMTU(data: data, appId: appId, callback: callback)
-            case "setBLEMTU": self.fail(name, callback, 10009, "system not support")
-            case "isBluetoothDevicePaired", "makeBluetoothPair": self.fail(name, callback, 10009, "system not support")
+            case "openSystemBluetoothSetting": self.openBluetoothSetting(callback: callback)
+            case "setBLEMTU": self.fail(name, callback, 10009, "not supported on iOS")
+            case "isBluetoothDevicePaired", "makeBluetoothPair": self.fail(name, callback, 10009, "not supported on iOS")
             case "onBluetoothAdapterStateChange": self.addListener(&self.adapterListeners, data, appId, callback)
             case "offBluetoothAdapterStateChange": self.removeListener(&self.adapterListeners, data, appId)
             case "onBluetoothDeviceFound": self.addListener(&self.deviceListeners, data, appId, callback)
@@ -356,6 +359,22 @@ final class BluetoothAPIManager: NSObject, CBCentralManagerDelegate, CBPeriphera
         let name = "getBLEMTU"
         guard let (_, peripheral) = connectedPeripheral(data, appId, name, callback) else { return }
         success(name, callback, ["mtu": peripheral.maximumWriteValueLength(for: .withoutResponse) + 3])
+    }
+
+    /// 安卓跳系统蓝牙设置页；iOS 无公开等价入口（"App-Prefs:Bluetooth" 是私有 scheme，
+    /// 有审核被拒风险），稳妥做法与 openSetting 同路径：打开本 App 的系统设置页，用户
+    /// 在那里可开启蓝牙。返回形状对齐安卓 SystemApi：成功仅 `{errMsg: "<name>:ok"}`。
+    private func openBluetoothSetting(callback: DMPBridgeCallback?) {
+        let name = "openSystemBluetoothSetting"
+        guard let url = URL(string: UIApplication.openSettingsURLString) else {
+            fail(name, callback, 10008, "system error")
+            return
+        }
+        // handle() 已在主线程，UIApplication.shared.open 可直接调用
+        UIApplication.shared.open(url, options: [:]) { [weak self] opened in
+            guard let self else { return }
+            if opened { self.success(name, callback) } else { self.fail(name, callback, 10008, "system error") }
+        }
     }
 
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
