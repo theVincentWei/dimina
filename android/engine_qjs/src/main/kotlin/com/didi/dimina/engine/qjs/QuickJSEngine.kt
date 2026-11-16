@@ -385,9 +385,29 @@ class QuickJSEngine {
     }
 
     @Suppress("unused")
-    fun publishCanvasFromJS(id: String, json: String, buffers: Array<ByteArray>) {
+    fun publishCanvasFromJS(
+        id: String,
+        json: String,
+        buffers: Array<ByteArray>,
+        // [rperf] 原生侧传回的时序（ns）：序列化段 / JNI 编组段。微维测期参数，整块可删。
+        rperfSerializeNs: Long = 0L,
+        rperfJniNs: Long = 0L,
+    ) {
+        // [rperf] BEGIN engine 侧 parse 计时（微维测期，整块可删）：JSON 字符串 → JSONObject
+        val rperfParseStartNs = if (RperfEngineStats.ENABLED) System.nanoTime() else 0L
         val message = JSONObject(json)
+        val rperfParseNs = if (rperfParseStartNs != 0L) System.nanoTime() - rperfParseStartNs else 0L
         message.getJSONObject("body").put("__diminaCanvasBuffers", buffers)
+        if (rperfParseNs != 0L) {
+            try {
+                if (message.getJSONObject("body").optString("name") == "canvasNodeFlush") {
+                    RperfEngineStats.record(rperfSerializeNs, rperfJniNs, rperfParseNs, json.length)
+                }
+            } catch (_: Throwable) {
+                // 打点永不影响渲染
+            }
+        }
+        // [rperf] END
         val handler = canvasPublishCallbacks[id]
         if (handler == null) { mainHandler.post { publishCallbacks[id]?.invoke(message) }; return }
         val done = CountDownLatch(1)

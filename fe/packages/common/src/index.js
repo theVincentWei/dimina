@@ -29,6 +29,16 @@ export {
 	transformDataFunctions,
 } from './core/data-function'
 
+export { encodeOpsCompact, decodeOpsCompact } from './core/canvas-ops-compact'
+export {
+	decodeOpsBinary,
+	decodeOpsBinaryEnvelope,
+	encodeOpsBinary,
+	OPS_BINARY_KNOWN_OPS,
+	OPS_BINARY_VERSION,
+	OpsBinaryUnsupportedError,
+} from './core/canvas-ops-binary'
+
 export {
 	matchesPropertyType,
 	normalizePropertyDefinition,

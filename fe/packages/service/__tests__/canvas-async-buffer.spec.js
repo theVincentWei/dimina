@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { callback } from '@dimina/common'
+import { callback, decodeOpsCompact } from '@dimina/common'
 import router from '../src/core/router.js'
 import { createOffscreenCanvas } from '../src/api/core/ui/canvas/index.js'
 
@@ -32,7 +32,12 @@ function create(flag = true, page = bridgeId) {
   return { node, gl }
 }
 function allocate(gl) { const result = gl[key](); result.catch(() => {}); pending.push(result); return result }
-function batches() { return globalThis.DiminaServiceBridge.publish.mock.calls.map(call => call[1].body.params) }
+// [rperf] 批次以 operationsCompact 字符串过桥；batches() 解码回对象数组，断言语义不变。
+// 注意：资源清理路径（canvas-node.js dispose 资源时）仍直发 operations 数组，helper 对两种形态都成立。
+function decodeBatch(params) {
+	return params.operationsCompact === undefined ? params : { ...params, operations: decodeOpsCompact(params.operationsCompact) }
+}
+function batches() { return globalThis.DiminaServiceBridge.publish.mock.calls.map(call => decodeBatch(call[1].body.params)) }
 function ack(batch, created = true) {
   const op = batch.operations.find(op => op.method === 'createBuffer')
   callback.invoke(batch.feedback, { contexts: { [op.contextId]: { resources: [{ resourceId: op.resultId, metadata: { created } }] } }, typedArrays: [] })
@@ -166,7 +171,7 @@ it('ignores a previously captured timeout after actual successful feedback', asy
 it('keeps a settled result when the bridge throws after synchronously delivering its feedback', async () => {
   const { gl } = create()
   globalThis.DiminaServiceBridge.publish.mockImplementationOnce((_type, request) => {
-    ack(request.body.params)
+    ack(decodeBatch(request.body.params))
     throw new Error('transport failed after delivery')
   })
   const result = await allocate(gl)

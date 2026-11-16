@@ -725,7 +725,14 @@ static bool isCanvasMessage(JSContext *ctx, JSValueConst message, bool publish) 
 }
 
 static JSValue deliverCanvas(JSContext *ctx, JNIEnv *env, EngineInstance *instance, JSValueConst message, JSValueConst page, bool publish) {
+    // [rperf] BEGIN engine_qjs 侧时序：序列化段（JS 对象→JSON 字符串 + 二进制 buffer 打包）计时。
+    // 微维测期一次性插桩，整块可删。steady_clock 为单调时钟，两次读约几十 ns，不影响渲染。
+    const auto rperfSerializeStart = std::chrono::steady_clock::now();
+    // [rperf] END
     const auto packet = dimina::canvas::SerializeCanvasBody(ctx, message, true);
+    // [rperf] BEGIN 序列化段结束；JNI 编组段（UTF-16 解码 + jstring/jbyteArray 构造 + 方法查找）开始
+    const auto rperfJniStart = std::chrono::steady_clock::now();
+    // [rperf] END
     dimina::bridge::LocalFrame frame(env);
     const auto json = dimina::bridge::decodeString(packet.json.data(), packet.json.size());
     auto text = env->NewString(reinterpret_cast<const jchar *>(json.data()), json.size());
@@ -743,9 +750,15 @@ static JSValue deliverCanvas(JSContext *ctx, JNIEnv *env, EngineInstance *instan
     if (publish) {
         const auto id = dimina::bridge::readString(ctx, page);
         auto key = env->NewString(reinterpret_cast<const jchar *>(id.data()), id.size());
-        auto method = env->GetMethodID(cls, "publishCanvasFromJS", "(Ljava/lang/String;Ljava/lang/String;[[B)V");
+        // [rperf] BEGIN 序列化段 / JNI 编组段纳秒数，随调用传给 Kotlin 汇总（微维测期，整块可删）
+        const auto rperfSerializeNs = static_cast<jlong>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(rperfJniStart - rperfSerializeStart).count());
+        const auto rperfJniNs = static_cast<jlong>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - rperfJniStart).count());
+        // [rperf] END
+        auto method = env->GetMethodID(cls, "publishCanvasFromJS", "(Ljava/lang/String;Ljava/lang/String;[[BJJ)V");
         dimina::bridge::checkJNI(env);
-        env->CallVoidMethod(instance->engineObj, method, key, text, arrays);
+        env->CallVoidMethod(instance->engineObj, method, key, text, arrays, rperfSerializeNs, rperfJniNs);
         dimina::bridge::checkJNI(env);
         return JS_UNDEFINED;
     }

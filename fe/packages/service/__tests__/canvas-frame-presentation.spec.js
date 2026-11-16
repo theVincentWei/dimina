@@ -35,7 +35,8 @@ it.each([false, true])('publishes a completed screen frame after the last query 
 	const packets = globalThis.DiminaServiceBridge.publish.mock.calls.map(([, message]) => message)
 	if (offscreen) expect(packets).toEqual([])
 	else expect(packets).toEqual([expect.objectContaining({
-		body: expect.objectContaining({ name: 'canvasNodeFlush', params: expect.objectContaining({ operations: [] }) }),
+		// [rperf] 空批次以空字符串 operationsCompact 过桥（无指令时的 present 通知帧）
+		body: expect.objectContaining({ name: 'canvasNodeFlush', params: expect.objectContaining({ operationsCompact: '' }) }),
 	})])
 	await Promise.resolve()
 	expect(globalThis.DiminaServiceBridge.publish.mock.calls).toHaveLength(offscreen ? 0 : 1)

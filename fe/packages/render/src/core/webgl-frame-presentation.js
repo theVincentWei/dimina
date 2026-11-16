@@ -20,8 +20,12 @@ export class WebGLFramePresentation {
 	present() {
 		if (!this.dirty || this.gl.isContextLost()) return
 		if (this.drawingCanvas.width === 0 || this.drawingCanvas.height === 0) { this.dirty = false; return }
+		const rperfT0 = Date.now()
 		this.context.globalCompositeOperation = 'copy'
 		this.context.drawImage(this.drawingCanvas, 0, 0)
+		const g = globalThis.__rperfPresent = globalThis.__rperfPresent || { n: 0, ms: 0, max: 0 }
+		const rperfDt = Date.now() - rperfT0
+		g.n++; g.ms += rperfDt; if (rperfDt > g.max) g.max = rperfDt
 		this.dirty = false
 		if (!this.gl.getContextAttributes().preserveDrawingBuffer) this.clearDrawingBuffer()
 	}

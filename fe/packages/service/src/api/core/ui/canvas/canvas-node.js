@@ -3,6 +3,8 @@ import {
 	base64ToArrayBuffer,
 	callback,
 	canvasPixelBudgetError,
+	encodeOpsBinary,
+	encodeOpsCompact,
 	isFunction,
 	isWebWorker,
 	normalizeCanvasBitmapDimension,
@@ -13,6 +15,110 @@ import { RetiredBufferReferences } from './retired-buffer-references'
 import hostEnv from '@/core/host-env'
 import message from '@/core/message'
 import router from '@/core/router'
+import { getStorageSync, setStorageSync } from '@/api/core/storage/index'
+
+// [rperf] 批次发送微维测（性能验证专用，可整体剥离）
+const rperfSvc = { win: [], lastDump: Date.now(), lastRender: null }
+// mitt emit 直接派发 body 本体（非信封），监听器按 body 形状接收
+message.on('rperfRender', (body) => {
+	if (body) rperfSvc.lastRender = body
+})
+function rperfSvcRecord(ops, ms, encodeMs, compactBytes, binary = 0) {
+	const now = Date.now()
+	rperfSvc.win.push({ ops, ms, encodeMs, compactBytes, binary })
+	if (now - rperfSvc.lastDump >= 5000) {
+		const w = rperfSvc.win
+		const sorted = w.map(e => e.ms).sort((a, b) => a - b)
+		const encodes = w.map(e => e.encodeMs || 0).sort((a, b) => a - b)
+		const pick = p => +(sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))] || 0).toFixed(1)
+		const pickE = p => +(encodes[Math.min(encodes.length - 1, Math.floor(encodes.length * p))] || 0).toFixed(2)
+		const summary = {
+			ts: now,
+			svc: {
+				flush: w.length,
+				ops: w.reduce((s, e) => s + e.ops, 0),
+				binary_flush: w.reduce((s, e) => s + (e.binary ? 1 : 0), 0),
+				bin_try: rperfBinDiag.try, bin_ok: rperfBinDiag.ok,
+				bin_noBridge: rperfBinDiag.noBridge, bin_encErr: rperfBinDiag.encErr,
+				bin_err: rperfBinDiag.err,
+				send_p50: pick(0.5),
+				send_p90: pick(0.9),
+				send_max: pick(1),
+				encode_p50: pickE(0.5),
+				encode_p90: pickE(0.9),
+				compact_kb: +(w.reduce((s, e) => s + (e.compactBytes || 0), 0) / 1024).toFixed(1),
+			},
+			rnd: rperfSvc.lastRender,
+		}
+		console.log('[rperf] svc: win=5s flush=' + summary.svc.flush + ' ops=' + summary.svc.ops
+			+ ' send_p50=' + summary.svc.send_p50 + 'ms send_p90=' + summary.svc.send_p90 + 'ms'
+			+ ' enc_p50=' + summary.svc.encode_p50 + 'ms bytes=' + summary.svc.compact_kb + 'KB'
+			+ ' binary=' + summary.svc.binary_flush + '/' + summary.svc.flush)
+		try {
+			setStorageSync('rperf_kernel', JSON.stringify(summary))
+		}
+		catch (e) { /* storage 不可用时静默（console 行仍在） */ }
+		rperfSvc.win = []
+		rperfSvc.lastDump = now
+	}
+}
+
+// [rperf] GL 指令流二进制传输 A/B 开关（性能验证专用，可整体剥离）
+// storage 'rperf_binary_on'：0（默认）= operationsCompact 紧凑字符串；1 = operationsBinary
+// 走容器 __diminaCanvasBuffers 纯二进制旁路（ArrayBuffer 经 WebMessagePort 直达渲染层，
+// 不过 JSON）。5s 刷新一次缓存，避免每帧同步读 storage。
+const rperfBinarySwitch = { at: 0, on: false }
+// [rperf] 二进制失败归因计数（临时诊断，可删）
+const rperfBinDiag = { try: 0, ok: 0, noBridge: 0, encErr: 0, err: '' }
+// [rperf] 构建期默认值：A/B 对照时改这一行（0=紧凑字符串基线，1=二进制指令流）
+const RPERF_BUILD_BINARY_ON = 1
+function rperfBinaryEnabled() {
+	const now = Date.now()
+	if (now - rperfBinarySwitch.at < 5000) return rperfBinarySwitch.on
+	rperfBinarySwitch.at = now
+	let on = RPERF_BUILD_BINARY_ON === 1 // 构建期默认
+	try {
+		const value = getStorageSync('rperf_binary_on')
+		// 只允许 storage 开启，不允许关闭：构建期默认值优先（避免小程序侧误写作覆盖 A/B）
+		if (value === 1 || value === '1' || value === true) on = true
+	}
+	catch {
+		// storage/桥不可用时保留构建期默认
+	}
+	rperfBinarySwitch.on = on
+	return on
+}
+
+// 把指令流 buffer 包成容器可识别的二进制信封：原生二进制就绪时
+// encodeCanvasArrayBuffer 返回 { packed }（≥1KB 且压缩划算时附 encoding:'rle32-v1'），
+// 不可用时返回 { base64 } 兼容降级；渲染层两种形态都支持。
+function rperfCanvasBinaryValue(bridgeId, buffer) {
+	const encode = globalThis.DiminaServiceBridge?.encodeCanvasArrayBuffer
+	if (typeof encode !== 'function' || globalThis.DiminaServiceBridge?.canvasBinarySupported !== true) return null
+	const bytes = new Uint8Array(buffer)
+	const input = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : bytes.slice().buffer
+	const encoded = encode(input, bridgeId)
+	if (!encoded || (encoded.packed === undefined && typeof encoded.base64 !== 'string')) return null
+	return { value: { __canvasTypedArray: 'Uint8Array', ...encoded }, byteLength: bytes.byteLength }
+}
+
+function rperfEncodeOperationsBinary(operations, bridgeId) {
+	if (!rperfBinaryEnabled() || operations.length === 0) return null
+	rperfBinDiag.try++
+	try {
+		const encoded = encodeOpsBinary(operations)
+		const value = rperfCanvasBinaryValue(bridgeId, encoded.buffer)
+		if (value) { rperfBinDiag.ok++ }
+		else { rperfBinDiag.noBridge++ }
+		return value
+	}
+	catch (e) {
+		// 未知 op / 无法无损编码的形状 → 整批回退紧凑字符串路径，永不破坏渲染。
+		rperfBinDiag.encErr++
+		rperfBinDiag.err = String((e && (e.message || e.name)) || e).slice(0, 80)
+		return null
+	}
+}
 import { adoptWebCanvas, getTransferredCanvas } from './web-canvas'
 import { createMeasureContext, measureTextWidth, parseFont } from './canvas-style'
 
@@ -2465,6 +2571,7 @@ export class CanvasNode {
 			return
 		}
 		this.presentationPending = false
+		const rperfT0 = Date.now()
 		const operations = this.compactStateFeedback(this.pendingOperations)
 		this.pendingOperations = []
 		const stateKeys = operations.flatMap((operation) => {
@@ -2474,6 +2581,14 @@ export class CanvasNode {
 			}
 			return []
 		})
+		// [rperf] 指令流编码：默认紧凑字符串过桥；storage 开关开启时改走纯二进制旁路。
+		const tEnc0 = Date.now()
+		let operationsCompact
+		let operationsBinary = null
+		const rperfBinary = rperfEncodeOperationsBinary(operations, this.bridgeId)
+		if (rperfBinary) operationsBinary = rperfBinary.value
+		else operationsCompact = encodeOpsCompact(operations)
+		const encodeMs = Date.now() - tEnc0
 		const needsDurableFeedback = operations.some(operation => operation.op === 'getContext'
 			|| operation.op === 'contextQuery'
 			|| operation.op === 'contextFeedback'
@@ -2502,14 +2617,29 @@ export class CanvasNode {
 				for (const key of ownedKeys) this.stateFeedbackByProperty.set(key, feedback)
 			}
 		}
+		const flushPayload = {
+			nodeId: this.nodeId,
+			feedback,
+			...(this.tracksRetiredBuffers ? { trackRetiredBuffers: 1 } : {}),
+			...(this.supportsDeferredGLErrors ? { deferErrorFeedback: true } : {}),
+		}
 		try {
-			sendCanvasMessage(this.bridgeId, 'canvasNodeFlush', {
-				nodeId: this.nodeId,
-				operations,
-				feedback,
-				...(this.tracksRetiredBuffers ? { trackRetiredBuffers: 1 } : {}),
-				...(this.supportsDeferredGLErrors ? { deferErrorFeedback: true } : {}),
-			})
+			if (operationsBinary) {
+				try {
+					sendCanvasMessage(this.bridgeId, 'canvasNodeFlush', { ...flushPayload, operationsBinary })
+				}
+				catch {
+					// 二进制通道拒收（页面切换瞬间 binary session 失效等）→ 本批整批回退紧凑字符串。
+					operationsBinary = null
+					operationsCompact = encodeOpsCompact(operations)
+					sendCanvasMessage(this.bridgeId, 'canvasNodeFlush', { ...flushPayload, operationsCompact })
+				}
+			}
+			else {
+				sendCanvasMessage(this.bridgeId, 'canvasNodeFlush', { ...flushPayload, operationsCompact })
+			}
+			rperfSvcRecord(operations.length, Date.now() - rperfT0, encodeMs,
+				operationsBinary ? rperfBinary.byteLength : operationsCompact.length, operationsBinary ? 1 : 0)
 		}
 		catch (error) {
 			this.removeCallback(feedback, error)

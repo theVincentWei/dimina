@@ -91,13 +91,22 @@ internal class CanvasBinaryChannel(view: WebView, private val readiness: (Boolea
         if (!ready) { complete(null, "Canvas binary page is unavailable"); return }
         try {
             val id = "$token:${++sequence}"
+            // [rperf] BEGIN 原生三段打点 b 段：header JSON 序列化耗时（微维测期，整块可删）
+            val rperfProbe = RperfNativeStats.current()
+            val rperfJsonStartNs = if (rperfProbe != null) System.nanoTime() else 0L
             val header = JSONObject().put("type", type).put("requestId", id).put("ack", true)
                 .put("deadline", deadline).put("body", body)
                 .put("byteLengths", JSONArray(buffers.map { it.size })).toString().toByteArray(Charsets.UTF_8)
+            if (rperfJsonStartNs != 0L) RperfNativeStats.addJson(rperfProbe, System.nanoTime() - rperfJsonStartNs)
+            // [rperf] END
             val size = 4L + header.size + buffers.sumOf { it.size.toLong() }
             require(size <= MAX_BYTES && buffers.size <= 4096) { "Canvas packet exceeds budget" }
+            // [rperf] BEGIN 单列 packet 段：header+buffers 拷进 ByteBuffer 的耗时（整块可删）
+            val rperfPacketStartNs = if (rperfProbe != null) System.nanoTime() else 0L
             val packet = ByteBuffer.allocate(size.toInt()).order(ByteOrder.LITTLE_ENDIAN).putInt(header.size).put(header)
             buffers.forEach { packet.put(it) }
+            if (rperfPacketStartNs != 0L) RperfNativeStats.addPacket(rperfProbe, System.nanoTime() - rperfPacketStartNs)
+            // [rperf] END
             post(id, WebMessageCompat(packet.array()), size.toInt(), complete)
         } catch (error: Exception) { complete(null, error.message); close(error.message ?: "Canvas delivery failed") }
     }
@@ -121,7 +130,17 @@ internal class CanvasBinaryChannel(view: WebView, private val readiness: (Boolea
             complete(null, reason); close(reason); return
         }
         pending[id] = Pending(bytes, complete); pendingBytes += bytes
-        try { port!!.postMessage(message) }
+        try {
+            // [rperf] BEGIN 原生三段打点 c 段：port.postMessage 投递耗时（微维测期，整块可删）
+            val rperfProbe = RperfNativeStats.current()
+            val rperfPostStartNs = if (rperfProbe != null) System.nanoTime() else 0L
+            try {
+                port!!.postMessage(message)
+            } finally {
+                if (rperfPostStartNs != 0L) RperfNativeStats.addPost(rperfProbe, System.nanoTime() - rperfPostStartNs)
+            }
+            // [rperf] END
+        }
         catch (error: Exception) { close(error.message ?: "Canvas delivery failed"); return }
         main.postDelayed({ if (pending.containsKey(id)) close("Canvas delivery timed out") }, 5000)
     }

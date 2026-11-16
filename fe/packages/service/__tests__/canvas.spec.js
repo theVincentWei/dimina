@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { callback, modDefine } from '@dimina/common'
+import { callback, decodeOpsCompact, modDefine } from '@dimina/common'
 import hostEnv from '../src/core/host-env.js'
 import loader from '../src/core/loader.js'
 import router from '../src/core/router.js'
@@ -15,6 +15,15 @@ import {
 } from '../src/api/core/ui/canvas/index.js'
 import { resetMiniGameCanvas } from '../src/api/core/ui/canvas/canvas-node.js'
 import { createImage } from '../src/api/core/media/image/index.js'
+
+// [rperf] 批次以 operationsCompact 字符串过桥；断言前解码回对象数组，保持原断言语义。
+// 注意：资源清理路径（canvas-node.js dispose 资源时）仍直发 operations 数组，helper 对两种形态都成立。
+const decodeBatch = message => message.body.params.operationsCompact !== undefined
+	? {
+		...message,
+		body: { ...message.body, params: { ...message.body.params, operations: decodeOpsCompact(message.body.params.operationsCompact) } },
+	}
+	: message
 
 describe('canvas api', () => {
 	function installWebGLCapabilities(overrides = {}) {
@@ -339,9 +348,9 @@ describe('canvas api', () => {
 			.toEqual(['createOffscreenCanvas', 'createGameCanvas'])
 
 		await Promise.resolve()
-		const flushMessage = globalThis.DiminaServiceBridge.publish.mock.calls
+		const flushMessage = decodeBatch(globalThis.DiminaServiceBridge.publish.mock.calls
 			.map(([, message]) => message)
-			.find(message => message.body.name === 'canvasNodeFlush')
+			.find(message => message.body.name === 'canvasNodeFlush'))
 		expect(flushMessage.body.params.operations.map(operation => operation.op)).toEqual(['createImage'])
 	})
 
@@ -508,7 +517,7 @@ describe('canvas api', () => {
 
 		expect(globalThis.DiminaServiceBridge.publish).toHaveBeenCalledTimes(2)
 		const [, createMessage] = globalThis.DiminaServiceBridge.publish.mock.calls[0]
-		const [, flushMessage] = globalThis.DiminaServiceBridge.publish.mock.calls[1]
+		const flushMessage = decodeBatch(globalThis.DiminaServiceBridge.publish.mock.calls[1][1])
 
 		expect(createMessage.body.name).toBe('createOffscreenCanvas')
 		expect(createMessage.body.params.width).toBe(320)
@@ -557,9 +566,9 @@ describe('canvas api', () => {
 		expect(context.wordSpacing).toBe('0px')
 
 		await Promise.resolve()
-		const flush = globalThis.DiminaServiceBridge.publish.mock.calls
+		const flush = decodeBatch(globalThis.DiminaServiceBridge.publish.mock.calls
 			.map(([, message]) => message)
-			.find(message => message.body.name === 'canvasNodeFlush')
+			.find(message => message.body.name === 'canvasNodeFlush'))
 		expect(flush.body.params.operations.filter(operation => operation.op === 'contextSetProperty'))
 			.toEqual([])
 	})
@@ -651,9 +660,9 @@ describe('canvas api', () => {
 		context.restore()
 		await Promise.resolve()
 
-		const flush = globalThis.DiminaServiceBridge.publish.mock.calls
+		const flush = decodeBatch(globalThis.DiminaServiceBridge.publish.mock.calls
 			.map(([, message]) => message)
-			.find(message => message.body.name === 'canvasNodeFlush')
+			.find(message => message.body.name === 'canvasNodeFlush'))
 		const restore = flush.body.params.operations.find(operation => operation.method === 'restore')
 		expect(restore.feedback).toBe('stateSnapshot')
 		callback.invoke(flush.body.params.feedback, {
@@ -730,9 +739,9 @@ describe('canvas api', () => {
 		context.filter = 'blur(2px)'
 		await Promise.resolve()
 
-		const flush = globalThis.DiminaServiceBridge.publish.mock.calls
+		const flush = decodeBatch(globalThis.DiminaServiceBridge.publish.mock.calls
 			.map(([, message]) => message)
-			.find(message => message.body.name === 'canvasNodeFlush')
+			.find(message => message.body.name === 'canvasNodeFlush'))
 		const setters = flush.body.params.operations.filter(operation => operation.prop === 'filter')
 		expect(setters.map(operation => operation.previousValue)).toEqual(['none', 'none'])
 	})
@@ -748,9 +757,9 @@ describe('canvas api', () => {
 		}
 		await Promise.resolve()
 
-		const flush = globalThis.DiminaServiceBridge.publish.mock.calls
+		const flush = decodeBatch(globalThis.DiminaServiceBridge.publish.mock.calls
 			.map(([, message]) => message)
-			.find(message => message.body.name === 'canvasNodeFlush')
+			.find(message => message.body.name === 'canvasNodeFlush'))
 		const operations = flush.body.params.operations
 
 		expect(operations.filter(operation => operation.op === 'contextSetProperty')).toHaveLength(8)
@@ -769,9 +778,9 @@ describe('canvas api', () => {
 		context.fillStyle = 'blue'
 		await Promise.resolve()
 
-		const flush = globalThis.DiminaServiceBridge.publish.mock.calls
+		const flush = decodeBatch(globalThis.DiminaServiceBridge.publish.mock.calls
 			.map(([, message]) => message)
-			.find(message => message.body.name === 'canvasNodeFlush')
+			.find(message => message.body.name === 'canvasNodeFlush'))
 		const setters = flush.body.params.operations.filter(operation => operation.prop === 'fillStyle')
 
 		expect(setters).toHaveLength(2)
@@ -810,9 +819,9 @@ describe('canvas api', () => {
 		context.putImageData(imageData, 0, 0)
 		await Promise.resolve()
 
-		const flush = globalThis.DiminaServiceBridge.publish.mock.calls
+		const flush = decodeBatch(globalThis.DiminaServiceBridge.publish.mock.calls
 			.map(([, message]) => message)
-			.find(message => message.body.name === 'canvasNodeFlush')
+			.find(message => message.body.name === 'canvasNodeFlush'))
 		const put = flush.body.params.operations.find(operation => operation.method === 'putImageData')
 		expect(put.args[0]).toEqual({
 			__canvasImageData: true,
@@ -837,9 +846,9 @@ describe('canvas api', () => {
 		const context = createOffscreenCanvas({ type: '2d' }).getContext('2d')
 		const pending = context.getImageData(0, 0, 1, 1)
 		await Promise.resolve()
-		const flush = globalThis.DiminaServiceBridge.publish.mock.calls
+		const flush = decodeBatch(globalThis.DiminaServiceBridge.publish.mock.calls
 			.map(([, message]) => message)
-			.find(message => message.body.name === 'canvasNodeFlush')
+			.find(message => message.body.name === 'canvasNodeFlush'))
 		const operation = flush.body.params.operations.find(item => item.op === 'getImageData')
 
 		callback.invoke(operation.callback, {
@@ -861,9 +870,9 @@ describe('canvas api', () => {
 		image.onerror = vi.fn()
 		image.src = '/ok.png'
 		await Promise.resolve()
-		const flush = globalThis.DiminaServiceBridge.publish.mock.calls
+		const flush = decodeBatch(globalThis.DiminaServiceBridge.publish.mock.calls
 			.map(([, message]) => message)
-			.find(message => message.body.name === 'canvasNodeFlush')
+			.find(message => message.body.name === 'canvasNodeFlush'))
 		const operation = flush.body.params.operations.find(item => item.op === 'imageSetSrc')
 		const callbackIds = [operation.callback, operation.onload, operation.onerror].filter(Boolean)
 		expect(callbackIds.length).toBeGreaterThan(0)
@@ -885,9 +894,9 @@ describe('canvas api', () => {
 		const image = canvas.createImage()
 		image.src = '/first.png'
 		await Promise.resolve()
-		const firstFlush = globalThis.DiminaServiceBridge.publish.mock.calls
+		const firstFlush = decodeBatch(globalThis.DiminaServiceBridge.publish.mock.calls
 			.map(([, message]) => message)
-			.find(message => message.body.name === 'canvasNodeFlush')
+			.find(message => message.body.name === 'canvasNodeFlush'))
 		const firstCallback = firstFlush.body.params.operations.find(item => item.op === 'imageSetSrc').callback
 		expect(callback.callbacks[firstCallback]).toBeDefined()
 
@@ -913,9 +922,9 @@ describe('canvas api', () => {
 		const canvas = createOffscreenCanvas({ type: '2d' })
 		const pending = canvas.toDataURL()
 		await Promise.resolve()
-		const flush = globalThis.DiminaServiceBridge.publish.mock.calls
+		const flush = decodeBatch(globalThis.DiminaServiceBridge.publish.mock.calls
 			.map(([, message]) => message)
-			.find(message => message.body.name === 'canvasNodeFlush')
+			.find(message => message.body.name === 'canvasNodeFlush'))
 		const operation = flush.body.params.operations.find(item => item.op === 'toDataURL')
 
 		canvas.dispose()
@@ -968,9 +977,9 @@ describe('canvas api', () => {
 		const context = createOffscreenCanvas({ type: '2d' }).getContext('2d')
 		const pending = context.getImageData(0, 0, 1, 1)
 		await Promise.resolve()
-		const flush = globalThis.DiminaServiceBridge.publish.mock.calls
+		const flush = decodeBatch(globalThis.DiminaServiceBridge.publish.mock.calls
 			.map(([, message]) => message)
-			.find(message => message.body.name === 'canvasNodeFlush')
+			.find(message => message.body.name === 'canvasNodeFlush'))
 		const operation = flush.body.params.operations.find(item => item.op === 'getImageData')
 
 		callback.invoke(operation.callback, { ok: false, error: 'read failed' })
@@ -1008,8 +1017,8 @@ describe('canvas api', () => {
 		extension.vertexAttribDivisorANGLE(1, 2)
 
 		await Promise.resolve()
-		const [, flushMessage] = globalThis.DiminaServiceBridge.publish.mock.calls
-			.find(([, message]) => message.body.name === 'canvasNodeFlush')
+		const flushMessage = decodeBatch(globalThis.DiminaServiceBridge.publish.mock.calls
+			.find(([, message]) => message.body.name === 'canvasNodeFlush')[1])
 		expect(flushMessage.body.params.operations.map(item => item.op)).toContain('getExtension')
 		expect(flushMessage.body.params.operations.map(item => item.op)).toContain('extensionCall')
 
@@ -1034,9 +1043,9 @@ describe('canvas api', () => {
 		gl.readPixels(0, 0, 2, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixels)
 
 		await Promise.resolve()
-		const flushMessage = globalThis.DiminaServiceBridge.publish.mock.calls
+		const flushMessage = decodeBatch(globalThis.DiminaServiceBridge.publish.mock.calls
 			.map(([, message]) => message)
-			.find(message => message.body.name === 'canvasNodeFlush')
+			.find(message => message.body.name === 'canvasNodeFlush'))
 		const { operations, feedback } = flushMessage.body.params
 		const readPixels = operations.find(item => item.method === 'readPixels')
 
