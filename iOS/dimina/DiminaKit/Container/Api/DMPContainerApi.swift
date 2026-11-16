@@ -89,6 +89,7 @@ public class DMPContainerApi: NSObject {
         _ = VideoAPI(app: app)
         _ = MediaUtilityAPI(app: app)
         _ = VideoDecoderAPI(app: app)
+        _ = AudioAPI(app: app)
         _ = InteractionAPI(app: app)
         _ = MenuAPI(app: app)
         _ = NavigationBarAPI(app: app)
