@@ -29,6 +29,10 @@ public class DMPPageController: UIViewController {
     // 页面照常卸载。退出小程序由关闭方在拆栈之前标注，见 DMPNavigator.markPageTeardownReason。
     private var pageStateTeardownReason: DMPPageStateTeardown = .routing
 
+    // [game-touch] 游戏触摸快路（微维测/AB 期，整块可删）。仅 game 运行时且开关非 '0'
+    // 才非空（见 GameTouchNativeRelay.swift）；页面拆毁时 dispose。
+    private var gameTouchRelay: DMPGameTouchNativeRelay?
+
     // WebView related
     private var webview: DMPWebview
     private let loadingStateObserverToken = UUID()
@@ -103,6 +107,12 @@ public class DMPPageController: UIViewController {
         DMPLogger.debug("🔧 DMPPageController: WebView (ID: \(webview.getWebViewId())) configuration completed, current page path: \(webview.getPagePath())")
         
         app?.render?.setupJSBridge(webViewId: webview.getWebViewId())
+
+        // [game-touch] BEGIN 原生触摸快路接线（微维测/AB 期，整块可删）：必须在
+        // setupJSBridge 之后、loadPageFrame 之前挂——快路的 document-start 用户脚本
+        // 要先于渲染层 runtime 求值。非 game 运行时/开关为 '0' 返回 nil，零影响。
+        gameTouchRelay = DMPGameTouchNativeRelay.attachIfEnabled(app: app, webview: webview)
+        // [game-touch] END
 
     }
 
@@ -975,6 +985,12 @@ public class DMPPageController: UIViewController {
         DMPLogger.debug("🗑️ DMPPageController: Destroy WebView (ID: \(webview.getWebViewId()))")
         isWebViewDestroyed = true
         webview.clearLoadingStateObserver(ownerToken: loadingStateObserverToken)
+
+        // [game-touch] BEGIN 桥销毁即摘快路：丢挂起 move + 摘手势（只摘自己实例，
+        // WebView 复用场景不影响新页面刚挂的快路）（整块可删）。
+        gameTouchRelay?.dispose()
+        gameTouchRelay = nil
+        // [game-touch] END
 
         notifyRoutingUnloadIfNeeded()
         
