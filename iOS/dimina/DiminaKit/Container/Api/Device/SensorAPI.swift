@@ -334,12 +334,12 @@ public final class SensorAPI: DMPContainerApi {
             }
             guard let motion else { return }
 
-            // 加速度：CMAcceleration 单位是 g，×9.80665 换算 m/s²（含重力，对齐 Android）
+            // 加速度：含重力 = gravity + userAcceleration（CMDeviceMotion 无 acceleration 成员，单位 g），×9.80665 换算 m/s²（对齐 Android）
             let gravity = SensorAPI.gravityMs2
             SensorAPI.fire(appId: appId, channel: .accelerometer, payload: [
-                "x": motion.acceleration.x * gravity,
-                "y": motion.acceleration.y * gravity,
-                "z": motion.acceleration.z * gravity,
+                "x": (motion.gravity.x + motion.userAcceleration.x) * gravity,
+                "y": (motion.gravity.y + motion.userAcceleration.y) * gravity,
+                "z": (motion.gravity.z + motion.userAcceleration.z) * gravity,
             ])
             // 陀螺仪：CMRotationRate 即 rad/s，直报
             SensorAPI.fire(appId: appId, channel: .gyroscope, payload: [
