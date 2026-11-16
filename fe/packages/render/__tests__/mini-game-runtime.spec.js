@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const { invoke, send } = vi.hoisted(() => ({ invoke: vi.fn(), send: vi.fn() }))
 vi.mock('../src/core/message', () => ({ default: { invoke, send } }))
@@ -13,6 +13,14 @@ describe('mini game render surface', () => {
 		runtime.canvasNodes.clear()
 		runtime.canvasResources.clear()
 		runtime.resourceLoadIds.clear()
+		runtime.canvasFrameStreams.clear()
+		runtime.canvasRafIds.clear()
+		runtime.gameTouchMoveBatch = null
+	})
+
+	afterEach(() => {
+		delete window.__diminaNativeGameTouch
+		vi.unstubAllGlobals()
 	})
 
 	it('mounts one full-screen canvas and forwards touch and simulated mouse events to service', () => {
@@ -90,14 +98,144 @@ describe('mini game render surface', () => {
 			clientX: { value: 90 }, clientY: { value: 120 },
 			pageX: { value: 90 }, pageY: { value: 120 },
 		})
+		send.mockClear()
 		canvas.dispatchEvent(hoverMove)
 
+		// 回退路径按帧合批：mousemove→touchmove 只进缓冲，不立即发包
+		expect(send).not.toHaveBeenCalled()
+		runtime.flushGameTouchMoveBatch()
 		expect(send).toHaveBeenLastCalledWith(expect.objectContaining({
 			body: expect.objectContaining({
 				eventType: 'touchmove',
 				touches: [expect.objectContaining({ clientX: 90, clientY: 120 })],
+				__domTs: expect.any(Number),
+				__domWall: expect.any(Number),
 			}),
 		}))
+	})
+	it('batches touchmove per frame and flushes pending moves before immediate phases', () => {
+		runtime.createGameCanvas({
+			bridgeId: 'bridge-game',
+			params: { nodeId: 'game-batch', width: 390, height: 844, type: '2d' },
+		})
+		const canvas = document.querySelector('[data-dimina-game-canvas]')
+		send.mockClear()
+		const moveAt = (x, y) => {
+			const event = new Event('touchmove', { cancelable: true })
+			Object.defineProperties(event, {
+				timeStamp: { value: 100 },
+				touches: { value: [{ identifier: 1, clientX: x, clientY: y, pageX: x, pageY: y, force: 0.5 }] },
+				changedTouches: { value: [{ identifier: 1, clientX: x, clientY: y, pageX: x, pageY: y, force: 0.5 }] },
+			})
+			canvas.dispatchEvent(event)
+		}
+		// 同一帧内的多条 move 只保留最新快照，不逐条发包
+		moveAt(10, 20)
+		moveAt(30, 40)
+		expect(send).not.toHaveBeenCalled()
+
+		// touchstart 先 flush 挂起的 move（最新快照、一次）再立即发自己，顺序保持
+		const startEvent = new Event('touchstart', { cancelable: true })
+		Object.defineProperties(startEvent, {
+			timeStamp: { value: 120 },
+			touches: { value: [{ identifier: 1, clientX: 50, clientY: 60, pageX: 50, pageY: 60, force: 1 }] },
+			changedTouches: { value: [{ identifier: 1, clientX: 50, clientY: 60, pageX: 50, pageY: 60, force: 1 }] },
+		})
+		canvas.dispatchEvent(startEvent)
+		expect(send.mock.calls.map(call => call[0].body.eventType)).toEqual(['touchmove', 'touchstart'])
+		expect(send).toHaveBeenNthCalledWith(1, expect.objectContaining({
+			type: 'gameTouch',
+			target: 'service',
+			body: expect.objectContaining({
+				eventType: 'touchmove',
+				timeStamp: 100,
+				touches: [expect.objectContaining({ clientX: 30, clientY: 40 })],
+				__domTs: expect.any(Number),
+				__domWall: expect.any(Number),
+			}),
+		}))
+
+		// 销毁后残留快照必须丢弃，不得再向 service 发包
+		moveAt(70, 80)
+		runtime.disposeCanvasNode('game-batch', 'bridge-game')
+		runtime.flushGameTouchMoveBatch()
+		expect(send).toHaveBeenCalledTimes(2)
+	})
+	it('skips DOM and mouse listeners when the native game touch fast path is on', () => {
+		window.__diminaNativeGameTouch = true
+		runtime.registerResourceLoad('bridge-native', 'load-native')
+		runtime.createGameCanvas({
+			bridgeId: 'bridge-native',
+			params: { nodeId: 'game-native', width: 390, height: 844, type: '2d' },
+		})
+		const canvas = document.querySelector('[data-dimina-game-canvas]')
+		// canvas/domReady/capabilities 契约保持不变
+		expect(canvas).toBeInstanceOf(HTMLCanvasElement)
+		expect(invoke).toHaveBeenCalledOnce()
+		send.mockClear()
+
+		for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel', 'mousemove', 'mousedown', 'mouseup']) {
+			const event = new Event(type, { cancelable: true })
+			if (type === 'mousedown' || type === 'mousemove' || type === 'mouseup') {
+				Object.defineProperties(event, {
+					button: { value: 0 },
+					clientX: { value: 1 }, clientY: { value: 2 },
+					pageX: { value: 1 }, pageY: { value: 2 },
+				})
+			}
+			canvas.dispatchEvent(event)
+		}
+		// 原生快路：WebView 不注册任何监听，不产生任何触摸包，也不留合批快照
+		expect(send).not.toHaveBeenCalled()
+		expect(runtime.gameTouchMoveBatch).toBeNull()
+	})
+	it('flushes the batched touchmove at frame start before the game tick callback', () => {
+		runtime.createGameCanvas({
+			bridgeId: 'bridge-game',
+			params: { nodeId: 'game-raf', width: 100, height: 100, type: '2d' },
+		})
+		const canvas = document.querySelector('[data-dimina-game-canvas]')
+		send.mockClear()
+		const queued = new Map()
+		let serial = 0
+		vi.stubGlobal('requestAnimationFrame', vi.fn(fn => queued.set(++serial, fn) && serial))
+		vi.stubGlobal('cancelAnimationFrame', vi.fn(id => queued.delete(id)))
+		const originalTrigger = runtime.triggerCallback
+		runtime.triggerCallback = vi.fn()
+		try {
+			runtime.canvasNodeSubscribeAnimationFrame({
+				bridgeId: 'bridge-game',
+				params: { nodeId: 'game-raf', requestId: 9, callback: 'tick', version: 1 },
+			})
+			const moveAt = (x) => {
+				const event = new Event('touchmove', { cancelable: true })
+				Object.defineProperties(event, {
+					timeStamp: { value: x },
+					touches: { value: [{ identifier: 1, clientX: x, clientY: 0, pageX: x, pageY: 0, force: 0 }] },
+					changedTouches: { value: [{ identifier: 1, clientX: x, clientY: 0, pageX: x, pageY: 0, force: 0 }] },
+				})
+				canvas.dispatchEvent(event)
+			}
+			// 一帧内两条 move：只留最新快照，rAF 帧首 flush 一条，随后才派发本帧 tick
+			moveAt(10)
+			moveAt(20)
+			expect(send).not.toHaveBeenCalled()
+			const [id, frameCallback] = queued.entries().next().value
+			queued.delete(id)
+			frameCallback(16.6)
+			expect(send.mock.calls.map(call => call[0].body.eventType)).toEqual(['touchmove'])
+			expect(send).toHaveBeenCalledWith(expect.objectContaining({
+				body: expect.objectContaining({
+					eventType: 'touchmove',
+					touches: [expect.objectContaining({ clientX: 20 })],
+					timeStamp: 20,
+				}),
+			}))
+			expect(runtime.triggerCallback).toHaveBeenCalledTimes(1)
+		}
+		finally {
+			runtime.triggerCallback = originalTrigger
+		}
 	})
 
 	it('releases the old game surface and its resources before a replacement is created', () => {

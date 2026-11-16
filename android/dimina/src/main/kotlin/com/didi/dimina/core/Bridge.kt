@@ -19,6 +19,9 @@ import com.didi.dimina.engine.qjs.JSValue
 import com.didi.dimina.ui.view.DiminaNativeComponentBridge
 import com.didi.dimina.ui.container.DiminaActivity
 import com.didi.dimina.ui.view.DiminaRenderBridge
+import com.didi.dimina.ui.view.GameTouchNativeRelay
+import com.didi.dimina.ui.view.GameTouchRelaySwitch
+import com.didi.dimina.ui.view.MiniProgramWebView
 import com.didi.dimina.ui.view.postMessage
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -49,6 +52,19 @@ class Bridge(
 ) {
     private val tag = "Bridge"
     private val id: String = "bridge_${Utils.uuid()}"
+
+    /** 对外只读的桥 id（[game-touch] 原生触摸快路等容器内组件以此键控消息）。 */
+    val bridgeId: String get() = id
+
+    // [game-touch] BEGIN 原生触摸快路开关（微维测/AB 期，整块可删）：
+    // 启动（建桥）时读一次文件，触摸路径上零文件 IO。关闭=不设委托、不注入能力标志。
+    internal val nativeGameTouchEnabled: Boolean =
+        GameTouchRelaySwitch.isEnabledFor(options.runtimeType, parent.filesDir, options.appId)
+
+    /** 挂在本桥 webview 上的快路委托，activity 在 createBridge 后设置；销毁时摘除。 */
+    internal var gameTouchRelay: GameTouchNativeRelay? = null
+    // [game-touch] END
+
     @Volatile
     private var serviceResource: Boolean = false
     @Volatile
@@ -66,6 +82,12 @@ class Bridge(
             mapOf("bridgeId" to id)
         )
     }
+
+    // [rperf] BEGIN 原生三段打点初始化（微维测期，整块可删）
+    init {
+        RperfNativeStats.attach(parent.filesDir)
+    }
+    // [rperf] END
 
     /**
      * Bridge 初始化逻辑
@@ -108,6 +130,13 @@ class Bridge(
             resourceLoadId = Utils.uuid()
             pageVisibilityLedger.onStart(visible)
             resourceLoadId!!
+        }
+
+        // [game-touch] 能力标志注入：start 由 pageLoaded 门控，此时 pageFrame 文档已就绪。
+        // fe render 的 createGameCanvas 据此跳过 DOM touch/mouse 监听（原生快路接管）。
+        // 开关关闭时不注入 → render 照常注册 DOM 监听，行为与旧版完全一致（A/B 基线臂）。
+        if (nativeGameTouchEnabled) {
+            options.webview.evaluateJavascript("window.__diminaNativeGameTouch=true", null)
         }
 
         // 通知渲染线程加载资源
@@ -330,35 +359,62 @@ class Bridge(
      * 消息中转
      */
     private fun messagePublish(msg: JSONObject, deadline: Long = Long.MAX_VALUE, admitted: ((String?) -> Unit)? = null) {
-        if (destroyed) {
-            admitted?.invoke("Canvas page has been disposed")
-            return
-        }
-        val body = msg.getJSONObject("body")
-        val bridgeId = body.optString("bridgeId")
-        if (bridgeId.isNotEmpty() && bridgeId != id) {
-            admitted?.invoke("Canvas page does not match")
-            return
-        }
+        // [rperf] BEGIN 原生三段打点（微维测期，整块可删）：帧级 probe 走本线程 ThreadLocal，
+        // handler_ms = 本函数进入→返回。ENABLED=false 时所有调用为 null 空操作。
+        val rperfProbe = RperfNativeStats.open()
+        try {
+        // [rperf] END
+            if (destroyed) {
+                admitted?.invoke("Canvas page has been disposed")
+                return
+            }
+            val body = msg.getJSONObject("body")
+            val bridgeId = body.optString("bridgeId")
+            if (bridgeId.isNotEmpty() && bridgeId != id) {
+                admitted?.invoke("Canvas page does not match")
+                return
+            }
 
-        val target = msg.getString("target")
-        if (admitted != null && target != "render") { admitted("Invalid Canvas publication target"); return }
-        if (target == "service") {
-            //  转发到逻辑线程
-            options.jscore.postMessage(msg.toString())
-        } else if (target == "render") {
-            @Suppress("UNCHECKED_CAST")
-            val buffers = body.remove("__diminaCanvasBuffers") as? Array<ByteArray> ?: emptyArray()
-            if (deadline <= System.currentTimeMillis()) { admitted?.invoke("Canvas publication timed out"); return }
-            canvasChannel.error?.let { admitted?.invoke(it); return }
-            if (canvasBinaryReady()) { canvasChannel.publish(msg, buffers, deadline, admitted); return }
-            if (buffers.isNotEmpty()) { admitted?.invoke("Canvas binary page is unavailable"); return }
-            // 转发到渲染线程
-            options.webview.postMessage(msg.toString())
-            admitted?.invoke(null)
+            val target = msg.getString("target")
+            // [rperf] 只对 target==render 且 body.name==canvasNodeFlush 出样本（整块可删）
+            RperfNativeStats.markFlush(rperfProbe, target, body)
+            if (admitted != null && target != "render") { admitted("Invalid Canvas publication target"); return }
+            if (target == "service") {
+                //  转发到逻辑线程
+                options.jscore.postMessage(msg.toString())
+            } else if (target == "render") {
+                @Suppress("UNCHECKED_CAST")
+                val buffers = body.remove("__diminaCanvasBuffers") as? Array<ByteArray> ?: emptyArray()
+                if (deadline <= System.currentTimeMillis()) { admitted?.invoke("Canvas publication timed out"); return }
+                canvasChannel.error?.let { admitted?.invoke(it); return }
+                if (canvasBinaryReady()) {
+                    // [rperf] 包一层准入回调：记录「handler 返回后才准入」的帧数（整块可删）
+                    val rperfAdmitted: ((String?) -> Unit)? = if (RperfNativeStats.eligible(rperfProbe)) {
+                        { error -> RperfNativeStats.notifyAdmitted(rperfProbe); admitted?.invoke(error) }
+                    } else {
+                        admitted
+                    }
+                    canvasChannel.publish(msg, buffers, deadline, rperfAdmitted)
+                    return
+                }
+                if (buffers.isNotEmpty()) { admitted?.invoke("Canvas binary page is unavailable"); return }
+                // 转发到渲染线程
+                // [rperf] BEGIN 非二进制通道回退路径：msg.toString() 即 b 段（整块可删）
+                val rperfJsonStartNs = if (RperfNativeStats.eligible(rperfProbe)) System.nanoTime() else 0L
+                val rperfText = msg.toString()
+                if (rperfJsonStartNs != 0L) {
+                    RperfNativeStats.addJson(rperfProbe, System.nanoTime() - rperfJsonStartNs)
+                    RperfNativeStats.markFallback(rperfProbe)
+                }
+                options.webview.postMessage(rperfText)
+                // [rperf] END
+                admitted?.invoke(null)
+            }
+        // [rperf] BEGIN 出样本（整块可删）
+        } finally {
+            RperfNativeStats.finish(rperfProbe)
         }
-
-
+        // [rperf] END
     }
 
     private fun isResourceLoaded(): Boolean {
@@ -406,6 +462,14 @@ class Bridge(
         reason: PageStateTeardown = PageStateTeardown.ROUTING,
     ) {
         parent.clearNativeComponents(this)
+        // [game-touch] BEGIN 桥销毁即摘快路：丢挂起 move + 拒后续事件（防旧桥幽灵触摸）。
+        // 只摘自己挂的委托——旧 WebView 被新桥复用时不清掉新桥刚挂的快路（整块可删）。
+        gameTouchRelay?.let { relay ->
+            relay.dispose()
+            (options.webview as? MiniProgramWebView)?.clearGameTouchDelegate(relay)
+            gameTouchRelay = null
+        }
+        // [game-touch] END
         val wasResourceLoaded = isResourceLoaded()
         synchronized(this) {
             destroyed = true

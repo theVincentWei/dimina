@@ -11,6 +11,10 @@ const controlMessages = new Set([
 	'mU', 'mT', 'flushCallbacks', 'hostEnvUpdate', 'loadResource', 'resourceLoaded',
 	'pageAttached', 'pageReady', 'mC', 'mA', 'mR', 'canvasCapabilities', 'canvasContextEvent', 'canvasTransfer', 'canvasTransferredDispose', 'resourceLoadFailed',
 	'fontFaceLoaded',
+	// [rperf] 微维测上报须在业务工作暂停/积压时仍然实时到达，否则 5s dump 的 rnd 恒为 null
+	'rperfRender',
+	// 小游戏触摸事件与 rAF tick 同级：高频渲染下不得进 background 队列饿死（R2 输入延迟）
+	'gameTouch',
 ])
 
 class Message {
@@ -36,6 +40,9 @@ class Message {
 			const decodedMsg = decodeDataFunctions(msg)
 			if (import.meta.env.DEV) console.log('[service] receive msg: ', decodedMsg.type)
 			const { type, body } = decodedMsg
+			// [game-touch] 输入埋点（原 patch-jssdk-input.py P4 源码化）：handleMsg 入口墙钟。
+			// gameTouch 走 controlMessages 直通，回调处用它算 __svcWait（service 内部排队）。
+			if (type === 'gameTouch') globalThis.__gtAt = Date.now()
 			const deliver = () => {
 				try { this.event.emit(type, body) }
 				catch (error) { reportAppError(error) }

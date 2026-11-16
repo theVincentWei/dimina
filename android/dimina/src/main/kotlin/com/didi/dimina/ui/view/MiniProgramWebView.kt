@@ -2,6 +2,7 @@ package com.didi.dimina.ui.view
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.view.MotionEvent
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import androidx.core.view.SoftwareKeyboardControllerCompat
@@ -11,6 +12,29 @@ import androidx.core.view.SoftwareKeyboardControllerCompat
 internal class MiniProgramWebView(context: Context) : WebView(context) {
     private var focusGeneration = 0
     private var keyboardPending = false
+
+    /**
+     * [game-touch] 游戏触摸快路委托（微维测/AB 期，整块可删）。非空时 dispatchTouchEvent
+     * 把事件直接转给快路并消费掉（return true），WebView 内部与 DOM 完全看不到事件；
+     * pageFrame 的 DOM touch/mouse 监听由 __diminaNativeGameTouch 能力标志跳过。
+     * 为空（开关关闭/非 game 运行时）走 super，行为与旧版完全一致。
+     */
+    var gameTouchDelegate: ((MotionEvent) -> Unit)? = null
+
+    /** 只摘除 owner 自己挂的委托，避免误清新桥刚挂上的快路（WebView 复用场景）。 */
+    fun clearGameTouchDelegate(owner: Any) {
+        if (gameTouchDelegate === owner) gameTouchDelegate = null
+    }
+
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        val delegate = gameTouchDelegate
+        if (delegate != null) {
+            delegate(event)
+            return true
+        }
+        return super.dispatchTouchEvent(event)
+    }
+
     var isPageActive = false
         set(value) {
             if (field == value) return

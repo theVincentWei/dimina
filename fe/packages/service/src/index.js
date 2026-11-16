@@ -44,6 +44,11 @@ class Service {
 		})
 
 		this.message.on('gameTouch', ({ eventType, ...event }) => {
+			// [game-touch] 输入埋点（原 patch-jssdk-input.py P4 源码化，字段名不变）：
+			// __svcAt = 回调执行墙钟；__svcWait = handleMsg 入口 → 回调执行（service 排队）。
+			// rest 展开保留 body 上未知字段（原生路径的 __natWall 等原样透传给游戏）。
+			event.__svcAt = Date.now()
+			if (globalThis.__gtAt) event.__svcWait = event.__svcAt - globalThis.__gtAt
 			emitGameTouch(eventType, event)
 		})
 

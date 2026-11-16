@@ -1,4 +1,4 @@
-import { arrayBufferToBase64, base64ToArrayBuffer, decodeCanvasRle32, CANVAS_ACTIVE_PROP, CANVAS_CONTRACT_CHANGE_EVENT, CANVAS_NODE_PROP, CANVAS_OWNER_PROP, canvasPixelBudgetError, cloneDeep, deepEqual, get, getDataAttributes, normalizePropertyValues as normalizeMiniProgramPropertyValues, propertyBindingPathMatches, propertyBindingPaths, resolvePropertyValue, set, toCamelCase, uuid } from '@dimina/common'
+import { arrayBufferToBase64, base64ToArrayBuffer, decodeCanvasRle32, decodeOpsBinaryEnvelope, decodeOpsCompact, CANVAS_ACTIVE_PROP, CANVAS_CONTRACT_CHANGE_EVENT, CANVAS_NODE_PROP, CANVAS_OWNER_PROP, canvasPixelBudgetError, cloneDeep, deepEqual, get, getDataAttributes, normalizePropertyValues as normalizeMiniProgramPropertyValues, propertyBindingPathMatches, propertyBindingPaths, resolvePropertyValue, set, toCamelCase, uuid } from '@dimina/common'
 import { Components, deepToRaw } from '@dimina/components'
 import {
 	computed,
@@ -44,6 +44,44 @@ import message from './message'
 import { CanvasTextureUpload } from './canvas-texture-upload'
 import { CanvasBufferReferences } from './canvas-buffer-references'
 import { WebGLFramePresentation } from './webgl-frame-presentation'
+
+// [rperf] 渲染批次微维测（性能验证专用，可整体剥离）
+const rperfRnd = { win: [], lastDump: Date.now() }
+function rperfRndRecord(ops, execMs, presentMs, decodeMs) {
+	const now = Date.now()
+	rperfRnd.win.push({ ops, execMs, presentMs, decodeMs: decodeMs || 0 })
+	if (now - rperfRnd.lastDump >= 5000) {
+		const w = rperfRnd.win
+		const execs = w.map(e => e.execMs).sort((a, b) => a - b)
+		const decodes = w.map(e => e.decodeMs).sort((a, b) => a - b)
+		const pick = (arr, p) => (arr[Math.min(arr.length - 1, Math.floor(arr.length * p))] || 0).toFixed(1)
+		const g = globalThis.__rperfPresent || { n: 0, ms: 0, max: 0 }
+		const presentAvg = g.n > 0 ? (g.ms / g.n).toFixed(1) : '-'
+		console.log('[rperf] rnd: win=5s flush=' + w.length + ' ops=' + w.reduce((s, e) => s + e.ops, 0)
+			+ ' exec_p50=' + pick(execs, 0.5) + 'ms exec_p90=' + pick(execs, 0.9) + 'ms exec_max=' + pick(execs, 1) + 'ms'
+			+ ' present_n=' + g.n + ' present_avg=' + presentAvg + 'ms present_max=' + g.max + 'ms')
+		// 经消息通道回传 service（真机 console 桥不可靠，文件出口为准）
+		message.send({
+			type: 'rperfRender',
+			target: 'service',
+			body: {
+				flush: w.length,
+				ops: w.reduce((s, e) => s + e.ops, 0),
+				exec_p50: +pick(execs, 0.5),
+				exec_p90: +pick(execs, 0.9),
+				exec_max: +pick(execs, 1),
+				present_n: g.n,
+				present_avg: g.n > 0 ? +(g.ms / g.n).toFixed(2) : 0,
+				present_max: g.max,
+				decode_p50: +pick(decodes, 0.5),
+				decode_p90: +pick(decodes, 0.9),
+			},
+		})
+		rperfRnd.win = []
+		rperfRnd.lastDump = now
+		g.n = 0; g.ms = 0; g.max = 0
+	}
+}
 import { resolveCanvasExportSize } from './canvas-export-limits'
 import { createMiniProgramSlots } from './slots'
 import { planKeyedRelationMoves } from './keyed-relation-moves'
@@ -696,6 +734,8 @@ class Runtime {
 		this.canvasResources = new Map()
 		this.canvasRafIds = new Map()
 		this.canvasFrameStreams = new Map()
+		// [game-touch] 回退路径 touchmove 按帧合批：最新快照槽位（rAF 帧首 flush，一帧最多一条）
+		this.gameTouchMoveBatch = null
 		this.canvasCapabilities = null
 		this.resourceLoadIds = new Map()
 		this._pageReRenderPending = false
@@ -2129,6 +2169,10 @@ class Runtime {
 			force: Number.isFinite(touch.force) ? touch.force : 0,
 		})
 		const handlers = new Map()
+		// [game-touch] 输入埋点（原 patch-jssdk-input.py P1 源码化，字段名不变）：
+		// __domTs 与 event.timeStamp 同为 performance.now 时基，差值 = renderer 主线程
+		// 排队（DOM 事件创建 → 发包）；__domWall 为 renderer 发包墙钟（与游戏 QuickJS
+		// Date.now 同域，S2 段起点）。仅回退路径产生；原生快路由原生附 __natWall。
 		const sendGameTouch = (eventType, touches, changedTouches, timeStamp) => {
 			message.send({
 				type: 'gameTouch',
@@ -2139,65 +2183,98 @@ class Runtime {
 					touches,
 					changedTouches,
 					timeStamp,
+					__domTs: performance.now(),
+					__domWall: Date.now(),
 				},
 			})
 		}
-		for (const eventType of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) {
-			const handler = (event) => {
-				if (event.cancelable) {
-					event.preventDefault()
-				}
-				sendGameTouch(
-					eventType,
-					Array.from(event.touches || [], serializeTouch),
-					Array.from(event.changedTouches || [], serializeTouch),
-					event.timeStamp,
-				)
+		// 原生快路开关：window.__diminaNativeGameTouch === true 时触摸由原生
+		// gameTouchDelegate 直送 JsCore（body 含 __natWall），WebView 内不注册任何
+		// DOM/mouse 监听（canvas、capabilities、domReady 契约保持不变）。
+		// 回退路径保留 DOM 监听，touchmove 按帧合批：只缓冲最新快照，挂在现有 rAF
+		// 帧流（canvasNodeSubscribeAnimationFrame / canvasNodeRequestAnimationFrame）
+		// 帧首 flush，一帧最多一条 message.send；start/end/cancel 先 flush 挂起的
+		// move 再立即发，保证事件顺序。
+		const nativeGameTouch = window.__diminaNativeGameTouch === true
+		const queueMoveBatch = (touches, changedTouches, timeStamp) => {
+			this.gameTouchMoveBatch = {
+				bridgeId,
+				send: () => sendGameTouch('touchmove', touches, changedTouches, timeStamp),
 			}
-			handlers.set(eventType, handler)
-			canvas.addEventListener(eventType, handler, { passive: false })
 		}
-
-		// 微信开发者工具会把模拟器里的鼠标操作转换成小游戏触摸事件。
-		// Web 容器做同样的兼容。触摸处理器已经 preventDefault，因此移动端
-		// 不会再派发兼容 mouse 事件，也就不会产生一触双发。
-		let mouseActive = false
-		let mouseHoverEnabled = false
-		const mouseEventTypes = {
-			mousedown: 'touchstart',
-			mousemove: 'touchmove',
-			mouseup: 'touchend',
-			mouseleave: 'touchcancel',
+		const flushMoveBatch = () => {
+			if (this.gameTouchMoveBatch?.bridgeId !== bridgeId) return
+			const batch = this.gameTouchMoveBatch
+			this.gameTouchMoveBatch = null
+			batch.send()
 		}
-		for (const [mouseType, touchType] of Object.entries(mouseEventTypes)) {
-			const handler = (event) => {
-				if (mouseType === 'mousedown') {
-					if (event.button !== 0) return
-					mouseActive = true
-					mouseHoverEnabled = true
+		if (!nativeGameTouch) {
+			for (const eventType of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) {
+				const handler = (event) => {
+					if (event.cancelable) {
+						event.preventDefault()
+					}
+					const touches = Array.from(event.touches || [], serializeTouch)
+					const changedTouches = Array.from(event.changedTouches || [], serializeTouch)
+					if (eventType === 'touchmove') {
+						queueMoveBatch(touches, changedTouches, event.timeStamp)
+					}
+					else {
+						flushMoveBatch()
+						sendGameTouch(eventType, touches, changedTouches, event.timeStamp)
+					}
 				}
-				else if (mouseType === 'mousemove' && !mouseHoverEnabled) {
-					return
-				}
-				else if (mouseType !== 'mousemove' && !mouseActive) {
-					return
-				}
-
-				if (event.cancelable) event.preventDefault()
-				const touch = serializeTouch({
-					identifier: 0,
-					clientX: event.clientX,
-					clientY: event.clientY,
-					pageX: event.pageX,
-					pageY: event.pageY,
-					force: mouseActive ? 0.5 : 0,
-				})
-				const ended = touchType === 'touchend' || touchType === 'touchcancel'
-				sendGameTouch(touchType, ended ? [] : [touch], [touch], event.timeStamp)
-				if (ended) mouseActive = false
+				handlers.set(eventType, handler)
+				canvas.addEventListener(eventType, handler, { passive: false })
 			}
-			handlers.set(mouseType, handler)
-			canvas.addEventListener(mouseType, handler, { passive: false })
+
+			// 微信开发者工具会把模拟器里的鼠标操作转换成小游戏触摸事件。
+			// Web 容器做同样的兼容。触摸处理器已经 preventDefault，因此移动端
+			// 不会再派发兼容 mouse 事件，也就不会产生一触双发。
+			let mouseActive = false
+			let mouseHoverEnabled = false
+			const mouseEventTypes = {
+				mousedown: 'touchstart',
+				mousemove: 'touchmove',
+				mouseup: 'touchend',
+				mouseleave: 'touchcancel',
+			}
+			for (const [mouseType, touchType] of Object.entries(mouseEventTypes)) {
+				const handler = (event) => {
+					if (mouseType === 'mousedown') {
+						if (event.button !== 0) return
+						mouseActive = true
+						mouseHoverEnabled = true
+					}
+					else if (mouseType === 'mousemove' && !mouseHoverEnabled) {
+						return
+					}
+					else if (mouseType !== 'mousemove' && !mouseActive) {
+						return
+					}
+
+					if (event.cancelable) event.preventDefault()
+					const touch = serializeTouch({
+						identifier: 0,
+						clientX: event.clientX,
+						clientY: event.clientY,
+						pageX: event.pageX,
+						pageY: event.pageY,
+						force: mouseActive ? 0.5 : 0,
+					})
+					const ended = touchType === 'touchend' || touchType === 'touchcancel'
+					if (touchType === 'touchmove') {
+						queueMoveBatch([touch], [touch], event.timeStamp)
+					}
+					else {
+						flushMoveBatch()
+						sendGameTouch(touchType, ended ? [] : [touch], [touch], event.timeStamp)
+					}
+					if (ended) mouseActive = false
+				}
+				handlers.set(mouseType, handler)
+				canvas.addEventListener(mouseType, handler, { passive: false })
+			}
 		}
 
 		document.body.append(canvas)
@@ -2210,6 +2287,8 @@ class Runtime {
 			resourceIds: new Set(),
 			bridgeId,
 			cleanup: () => {
+				// 丢弃尚未 flush 的 touchmove 合批快照，避免销毁后仍向 service 发包
+				if (this.gameTouchMoveBatch?.bridgeId === bridgeId) this.gameTouchMoveBatch = null
 				for (const [eventType, handler] of handlers) {
 					canvas.removeEventListener(eventType, handler)
 				}
@@ -2778,6 +2857,25 @@ class Runtime {
 	}
 
 	canvasNodeFlush({ bridgeId, params, synchronous = false }) {
+		// [rperf] 指令流三态解码：二进制信封 → decodeOpsBinaryEnvelope（原生二进制旁路）；
+		// 紧凑字符串 → decodeOpsCompact；operations 数组 → 原样（旧路径/回退态）。
+		if (params.operationsBinary) {
+			const rperfBinDec0 = Date.now()
+			try {
+				params.operations = decodeOpsBinaryEnvelope(params.operationsBinary)
+			}
+			catch (error) {
+				// 线格式异常不能打断渲染：本批按空批次处理并告警（service 侧整批回退兜底）。
+				console.warn('[system]', '[render]', `canvas operationsBinary decode failed: ${error}`)
+				params.operations = []
+			}
+			params.__rperfDecodeMs = Date.now() - rperfBinDec0
+		}
+		else if (typeof params.operationsCompact === 'string') {
+			const rperfDec0 = Date.now()
+			params.operations = decodeOpsCompact(params.operationsCompact)
+			params.__rperfDecodeMs = Date.now() - rperfDec0
+		}
 		const node = this.canvasNodes.get(params.nodeId)
 		if (!node) {
 			if (synchronous) return { error: 'canvas node not found' }
@@ -2798,6 +2896,7 @@ class Runtime {
 		}
 		const touchedContexts = new Set()
 		const errorFeedbackContexts = new Set()
+		const rperfT0 = Date.now()
 		for (const operation of params.operations || []) {
 			if (operation.contextId) {
 				touchedContexts.add(operation.contextId)
@@ -2874,8 +2973,13 @@ class Runtime {
 				}
 			}
 		}
-		if (synchronous) return feedback
+		if (synchronous) {
+			rperfRndRecord(params.operations ? params.operations.length : 0, Date.now() - rperfT0, 0, params.__rperfDecodeMs)
+			return feedback
+		}
+		const rperfP0 = Date.now()
 		node.presentation?.present()
+		rperfRndRecord(params.operations ? params.operations.length : 0, Date.now() - rperfT0, Date.now() - rperfP0, params.__rperfDecodeMs)
 		this.triggerCallback(bridgeId, params.feedback, feedback)
 	}
 
@@ -2893,6 +2997,8 @@ class Runtime {
 			this.canvasRafIds.set(key, requestAnimationFrame((timestamp) => {
 				if (this.canvasFrameStreams.get(key) !== stream || this.canvasNodes.get(params.nodeId) !== node) return
 				this.canvasRafIds.delete(key)
+				// [game-touch] 帧首 flush 回退路径合批的 touchmove（先于本帧游戏 tick）
+				this.flushGameTouchMoveBatch()
 				const sequence = ++stream.sequence
 				stream.schedule()
 				this.triggerCallback(bridgeId, params.callback, { requestId: params.requestId, sequence, timestamp })
@@ -2916,9 +3022,20 @@ class Runtime {
 		const key = `${params.nodeId}:${params.requestId}`
 		const frameId = requestAnimationFrame((timestamp) => {
 			this.canvasRafIds.delete(key)
+			// [game-touch] 一次性 rAF 兜底路径同样帧首 flush（与帧流互斥，二次 flush 为空操作）
+			this.flushGameTouchMoveBatch()
 			this.triggerCallback(bridgeId, params.callback, timestamp)
 		})
 		this.canvasRafIds.set(key, frameId)
+	}
+
+	// [game-touch] 回退路径 touchmove 按帧合批的帧首 flush：由现有 rAF 帧流/一次性
+	// rAF 每帧回调开头调用，一帧最多一条 message.send；原生快路不产生积压，此处空操作。
+	flushGameTouchMoveBatch() {
+		const batch = this.gameTouchMoveBatch
+		if (!batch) return
+		this.gameTouchMoveBatch = null
+		batch.send()
 	}
 
 	canvasNodeCancelAnimationFrame({ bridgeId, params }) {

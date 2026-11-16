@@ -151,6 +151,8 @@ import com.didi.dimina.ui.view.ActionSheet
 import com.didi.dimina.ui.view.ContactPicker
 import com.didi.dimina.ui.view.DiminaTabBar
 import com.didi.dimina.ui.view.DiminaWebView
+import com.didi.dimina.ui.view.GameTouchNativeRelay
+import com.didi.dimina.ui.view.MiniProgramWebView
 import com.didi.dimina.ui.view.MediaPickerRoot
 import com.didi.dimina.ui.view.MediaType
 import com.didi.dimina.ui.view.VideoCaptureOptions
@@ -871,6 +873,20 @@ class DiminaActivity : ComponentActivity() {
     private fun createBridge(options: BridgeOptions, setAsActive: Boolean = true): Bridge {
         val bridge = Bridge(options = options, parent = this)
         bridge.init()
+        // [game-touch] BEGIN 原生触摸快路接线（微维测/AB 期，整块可删）：仅 game 运行时且
+        // 开关非 '0'（Bridge.nativeGameTouchEnabled 已在构造时读一次文件，触摸路径零 IO）。
+        // 挂委托后 dispatchTouchEvent 直接把触摸事件转给 QuickJS service（JsCore），
+        // 绕开 renderer 线程帧槽位排队；开关关闭=不设委托，行为与旧版完全一致（A/B 基线臂）。
+        if (bridge.nativeGameTouchEnabled) {
+            val relay = GameTouchNativeRelay(
+                jscore = options.jscore,
+                bridgeId = bridge.bridgeId,
+                density = resources.displayMetrics.density,
+            )
+            (options.webview as? MiniProgramWebView)?.gameTouchDelegate = relay
+            bridge.gameTouchRelay = relay
+        }
+        // [game-touch] END
         if (setAsActive) {
             this.bridge = bridge
         }
