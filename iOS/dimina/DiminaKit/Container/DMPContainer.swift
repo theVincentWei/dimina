@@ -189,6 +189,12 @@ public class DMPContainer {
         }
 
         DMPLogger.debug("Bridge invoke error: 未找到方法: \(methodName)")
+        // 未命中兜底：对齐安卓 ApiRegistry（"<api>:fail api is not supported"）。JS 侧不消费
+        // 同步返回值、结果靠 triggerCallback 异步回——异步调用（param 带 success/fail/complete
+        // id）需补发 fail 回调，否则 success/fail/complete 永不触发、promise 永不落定。
+        if param.isAsync {
+            DMPContainerApi.invokeFailure(callback: callback, param: DMPMap(), errMsg: "\(methodName):fail api is not supported")
+        }
         return DMPSyncResult(["error": "未找到方法: \(methodName)"])
     }
 

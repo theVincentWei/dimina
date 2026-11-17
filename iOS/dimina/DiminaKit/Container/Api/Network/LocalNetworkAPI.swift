@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import Network
 
 private let localNetworkArrayBufferKey = "__diminaArrayBufferBase64"
 
@@ -44,6 +45,9 @@ public final class LocalNetworkAPI: DMPContainerApi {
     @BridgeMethod("UDPSocket.onMessage") var udpOnMessage: DMPBridgeMethodHandler = { bridge("UDPSocket.onMessage", $0, $1, $2) }
     @BridgeMethod("UDPSocket.offMessage") var udpOffMessage: DMPBridgeMethodHandler = { bridge("UDPSocket.offMessage", $0, $1, $2) }
 
+    @BridgeMethod("TCPSocket.bindWifi") var tcpBindWifi: DMPBridgeMethodHandler = { bridge("TCPSocket.bindWifi", $0, $1, $2) }
+    @BridgeMethod("TCPSocket.onBindWifi") var tcpOnBindWifi: DMPBridgeMethodHandler = { bridge("TCPSocket.onBindWifi", $0, $1, $2) }
+    @BridgeMethod("TCPSocket.offBindWifi") var tcpOffBindWifi: DMPBridgeMethodHandler = { bridge("TCPSocket.offBindWifi", $0, $1, $2) }
     @BridgeMethod("TCPSocket.close") var tcpClose: DMPBridgeMethodHandler = { bridge("TCPSocket.close", $0, $1, $2) }
     @BridgeMethod("TCPSocket.connect") var tcpConnect: DMPBridgeMethodHandler = { bridge("TCPSocket.connect", $0, $1, $2) }
     @BridgeMethod("TCPSocket.write") var tcpWrite: DMPBridgeMethodHandler = { bridge("TCPSocket.write", $0, $1, $2) }
@@ -129,6 +133,112 @@ private final class IOSTCPSocketState {
         }
         return true
     }
+
+    /// bindWifi 生效后记录 WiFi 接口索引，并给已建立的连接补绑（后续收发包走 WiFi，
+    /// 对齐安卓 `network.bindSocket(socket)` 对既有 socket 生效的语义）。
+    func applyWifiBinding(index: UInt32) {
+        lock.lock(); defer { lock.unlock() }
+        wifiInterfaceIndex = index
+        guard fd >= 0, !didClose else { return }
+        bindSocketToInterface(fd: fd, index: index)
+    }
+
+    /// WiFi 路径丢失后清掉记录。不主动解绑既有 fd（IP_BOUND_IF 无公开解绑口），
+    /// 连接本身会因路由失效报错断开并由 onError/onClose 通知。
+    func clearWifiBinding() {
+        lock.lock(); defer { lock.unlock() }
+        wifiInterfaceIndex = 0
+    }
+
+    private var wifiInterfaceIndex: UInt32 = 0
+}
+
+/// 把 socket 绑定到指定网络接口索引：IPv4 走 IP_BOUND_IF，IPv6（含 v4 映射）走
+/// IPV6_BOUND_IF，两个都设互不影响。这是 iOS 上对应安卓 `network.bindSocket` 的能力。
+private func bindSocketToInterface(fd: Int32, index: UInt32) {
+    var index = index
+    _ = setsockopt(fd, IPPROTO_IP, IP_BOUND_IF, &index, socklen_t(MemoryLayout<UInt32>.size))
+    _ = setsockopt(fd, IPPROTO_IPV6, IPV6_BOUND_IF, &index, socklen_t(MemoryLayout<UInt32>.size))
+}
+
+/// TCPSocket.bindWifi 的每个 socket 一份订阅（学 NetworkTypeAPI 的订阅表模式）：
+/// NWPathMonitor 以 `requiredInterfaceType = .wifi` 约束路径，「连接的当前路径是否为
+/// WiFi」变化时由 manager 回点火 TCPSocket.onBindWifi / TCPSocket.onError；
+/// 首个 path 回调必报（没 WiFi 立刻回 onError，对齐安卓 bindWifi 调用即出结果）。
+private final class TCPWifiBindState {
+    let appId: String
+    let socketId: String
+    let monitor: NWPathMonitor
+    let queue: DispatchQueue
+    private let lock = NSLock()
+    private let pathConfirmed = DispatchSemaphore(value: 0)
+    private var bound = false
+    private var reportedOnce = false
+    private var announced = false
+    private var interfaceIndex: UInt32 = 0
+
+    init(appId: String, socketId: String) {
+        self.appId = appId
+        self.socketId = socketId
+        queue = DispatchQueue(label: "com.didi.dimina.tcp-wifi.\(appId)")
+        // NWPathMonitor 在 iOS 14 部署目标可用面里没有 requiredInterfaceTypes(iOS 17.4+),
+        // 用无约束监视器:handleWifiPath 侧自判 usesInterfaceType(.wifi),语义等价。
+        monitor = NWPathMonitor()
+    }
+
+    func start(onUpdate: @escaping (NWPath) -> Void) {
+        monitor.pathUpdateHandler = onUpdate
+        monitor.start(queue: queue)
+    }
+
+    /// 摘订阅（socket 关闭 / clearApp / 重复 bindWifi 换绑）。
+    func stop() {
+        monitor.cancel()
+        announcePath()
+    }
+
+    /// 决定是否回点火：首个 path 回调必报（对齐安卓「bindWifi 调用即出结果」，没 WiFi
+    /// 立刻回 onError），之后仅在「是否 WiFi」跃迁时报。返回 nil 表示不点火。
+    func reportTransition(satisfied: Bool) -> Bool? {
+        lock.lock(); defer { lock.unlock() }
+        let isFirst = !reportedOnce
+        let changed = bound != satisfied
+        bound = satisfied
+        reportedOnce = true
+        if isFirst || changed { return satisfied }
+        return nil
+    }
+
+    func setInterfaceIndex(_ index: UInt32) {
+        lock.lock(); defer { lock.unlock() }
+        interfaceIndex = index
+    }
+
+    func currentInterfaceIndex() -> UInt32 {
+        lock.lock(); defer { lock.unlock() }
+        return interfaceIndex
+    }
+
+    /// 首个 path 回调到达时置位并唤醒可能在 connect 前等待确认的一方。
+    func announcePath() {
+        lock.lock()
+        let first = !announced
+        announced = true
+        lock.unlock()
+        if first { pathConfirmed.signal() }
+    }
+
+    /// connect 前取 WiFi 接口索引：path 已确认直接返回；否则等首个 path 回调握手
+    /// （信号量 + 有界超时，非盲等）。超时/未绑定返回 0，连接按系统默认路由走。
+    func waitForInterfaceIndex(timeout: Double) -> UInt32 {
+        lock.lock()
+        let announcedNow = announced
+        lock.unlock()
+        if !announcedNow {
+            _ = pathConfirmed.wait(timeout: .now() + timeout)
+        }
+        return currentInterfaceIndex()
+    }
 }
 
 private enum LocalNetworkError: Error {
@@ -156,6 +266,7 @@ final class LocalNetworkAPIManager {
     private let ioQueue = DispatchQueue(label: "com.didi.dimina.local-network.io", qos: .utility, attributes: .concurrent)
     private var udpSockets: [String: IOSUDPSocketState] = [:]
     private var tcpSockets: [String: IOSTCPSocketState] = [:]
+    private var wifiBinds: [String: TCPWifiBindState] = [:]
     private var listeners: [String: DMPBridgeCallback] = [:]
     private var discoveries: [String: LocalServiceDiscoveryState] = [:]
 
@@ -175,8 +286,7 @@ final class LocalNetworkAPIManager {
         case "UDPSocket.connect": connectUDP(data: data, appId: appId)
         case "UDPSocket.send", "UDPSocket.write": sendUDP(data: data, appId: appId)
         case "UDPSocket.setTTL": setUDPTTL(data: data, appId: appId)
-        case "TCPSocket.bindWifi":
-            emitError(event: "TCPSocket.onError", appId: appId, socketId: data.getString(key: "socketId") ?? "", message: "system not support")
+        case "TCPSocket.bindWifi": bindTcpWifi(data: data, appId: appId)
         case "TCPSocket.close": closeTCP(data: data, appId: appId)
         case "TCPSocket.connect": connectTCP(data: data, appId: appId)
         case "TCPSocket.write": writeTCP(data: data, appId: appId)
@@ -380,6 +490,9 @@ final class LocalNetworkAPIManager {
                     guard fd >= 0 else { throw LocalNetworkError.posix("socket") }
                     do {
                         try state.install(fd: fd)
+                        // bindWifi 生效中：把 socket 绑到 WiFi 接口索引，保证连接走 WiFi
+                        let wifiIndex = self.tcpWifiInterfaceIndex(appId: appId, socketId: socketId)
+                        if wifiIndex != 0 { bindSocketToInterface(fd: fd, index: wifiIndex) }
                         try self.connectWithTimeout(fd: fd, address: &address, timeout: timeout)
                         self.emit(event: "TCPSocket.onConnect", appId: appId, socketId: socketId, value: [:])
                         self.startTCPReceive(state)
@@ -489,9 +602,67 @@ final class LocalNetworkAPIManager {
         if let state { closeTCPState(state) }
     }
 
+    /// 安卓契约：参数 socketId + BSSID（必填），结果走持久事件——成功回点火
+    /// TCPSocket.onBindWifi（空对象），失败回点火 TCPSocket.onError（{errMsg}）。
+    /// iOS 用 NWPathMonitor(requiredInterfaceType = .wifi) 复刻：WiFi 路径就绪视为绑定
+    /// 成功，「当前路径是否为 WiFi」跃迁时重复回点火；无法做安卓那样的 AP（BSSID）级
+    /// 匹配——iOS 公开 API 拿不到当前 AP 的 BSSID，差异见交付说明。
+    private func bindTcpWifi(data: DMPMap, appId: String) {
+        do {
+            let socketId = try required(data, "socketId")
+            // 契约对齐安卓：BSSID 必填校验；iOS 不校验具体 AP（拿不到），仅要求非空。
+            _ = try required(data, "BSSID")
+            let state = tcpState(appId: appId, socketId: socketId)
+            let bind = TCPWifiBindState(appId: appId, socketId: socketId)
+            let previous = stateQueue.sync { () -> TCPWifiBindState? in
+                let key = socketKey(appId, socketId)
+                let old = wifiBinds[key]
+                wifiBinds[key] = bind
+                return old
+            }
+            previous?.stop()
+            bind.start { [weak self, weak bind] path in
+                guard let self, let bind else { return }
+                self.handleWifiPath(bind: bind, state: state, path: path)
+            }
+        } catch {
+            emitError(event: "TCPSocket.onError", appId: appId, socketId: data.getString(key: "socketId") ?? "", error: error)
+        }
+    }
+
+    private func handleWifiPath(bind: TCPWifiBindState, state: IOSTCPSocketState, path: NWPath) {
+        let satisfied = path.status == .satisfied && path.usesInterfaceType(.wifi)
+        if satisfied, let interface = path.availableInterfaces.first(where: { $0.type == .wifi }) {
+            bind.setInterfaceIndex(UInt32(interface.index))
+        }
+        bind.announcePath()
+        guard let reportedSatisfied = bind.reportTransition(satisfied: satisfied) else { return }
+        if reportedSatisfied {
+            // 已建立的连接补绑到 WiFi 接口；之后的 connect 也会取该索引绑接口
+            let index = bind.currentInterfaceIndex()
+            if index != 0 { state.applyWifiBinding(index: index) }
+            emit(event: "TCPSocket.onBindWifi", appId: bind.appId, socketId: bind.socketId, value: [:])
+        } else {
+            state.clearWifiBinding()
+            // 与安卓失败文案一致：找不到满足约束的 WiFi 网络时回 onError
+            emitError(event: "TCPSocket.onError", appId: bind.appId, socketId: bind.socketId, message: "wifi network not found")
+        }
+    }
+
+    /// connect 前取 bindWifi 生效中的 WiFi 接口索引（0 = 未绑定，按默认路由连接）。
+    private func tcpWifiInterfaceIndex(appId: String, socketId: String) -> UInt32 {
+        guard let bind = stateQueue.sync(execute: { wifiBinds[socketKey(appId, socketId)] }) else { return 0 }
+        return bind.waitForInterfaceIndex(timeout: 0.3)
+    }
+
     private func closeTCPState(_ state: IOSTCPSocketState) {
         guard state.close() else { return }
-        _ = stateQueue.sync { tcpSockets.removeValue(forKey: socketKey(state.appId, state.socketId)) }
+        let wifiBind = stateQueue.sync { () -> TCPWifiBindState? in
+            let key = socketKey(state.appId, state.socketId)
+            tcpSockets.removeValue(forKey: key)
+            return wifiBinds.removeValue(forKey: key)
+        }
+        wifiBind?.stop()
         emit(event: "TCPSocket.onClose", appId: state.appId, socketId: state.socketId, value: [:])
         clearSocketListeners(appId: state.appId, prefix: "TCPSocket", socketId: state.socketId)
     }
@@ -731,16 +902,19 @@ final class LocalNetworkAPIManager {
     }
 
     func clearApp(_ appId: String) {
-        let resources = stateQueue.sync { () -> ([IOSUDPSocketState], [IOSTCPSocketState], LocalServiceDiscoveryState?) in
+        let resources = stateQueue.sync { () -> ([IOSUDPSocketState], [IOSTCPSocketState], LocalServiceDiscoveryState?, [TCPWifiBindState]) in
             let udp = udpSockets.filter { $0.value.appId == appId }.map(\.value)
             let tcp = tcpSockets.filter { $0.value.appId == appId }.map(\.value)
+            let binds = wifiBinds.filter { $0.value.appId == appId }.map(\.value)
             udpSockets = udpSockets.filter { $0.value.appId != appId }
             tcpSockets = tcpSockets.filter { $0.value.appId != appId }
+            wifiBinds = wifiBinds.filter { $0.value.appId != appId }
             listeners = listeners.filter { !$0.key.hasPrefix("\(appId)\u{0}") }
-            return (udp, tcp, discoveries.removeValue(forKey: appId))
+            return (udp, tcp, discoveries.removeValue(forKey: appId), binds)
         }
         resources.0.forEach { $0.close() }
         resources.1.forEach { $0.close() }
+        resources.3.forEach { $0.stop() }
         DispatchQueue.main.async { resources.2?.stop() }
     }
 }

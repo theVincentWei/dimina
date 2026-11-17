@@ -77,6 +77,7 @@ public class DMPContainerApi: NSObject {
         _ = ContactAPI(app: app)
         _ = KeyboardAPI(app: app)
         _ = NetworkTypeAPI(app: app)
+        _ = SensorAPI(app: app)
         _ = ScreenAPI(app: app)
         _ = SettingAPI(app: app)
         _ = SubscribeMessageAPI(app: app)
@@ -89,6 +90,7 @@ public class DMPContainerApi: NSObject {
         _ = VideoAPI(app: app)
         _ = MediaUtilityAPI(app: app)
         _ = VideoDecoderAPI(app: app)
+        _ = AudioAPI(app: app)
         _ = InteractionAPI(app: app)
         _ = MenuAPI(app: app)
         _ = NavigationBarAPI(app: app)
@@ -124,6 +126,12 @@ public class DMPContainerApi: NSObject {
             return handler(data, env, callback)
         }
         DMPLogger.debug("未找到方法: \(name)")
+        // 未命中兜底：对齐安卓 ApiRegistry（"<api>:fail api is not supported"）。异步调用
+        // （param 带 success/fail/complete id）补发 fail 回调，避免 JS 侧 promise 永不落定；
+        // 同步消费者不受影响（仍返回 DMPNoneResult）。
+        if data.isAsync {
+            Self.invokeFailure(callback: callback, param: DMPMap(), errMsg: "\(name):fail api is not supported")
+        }
         return DMPNoneResult()
     }
     

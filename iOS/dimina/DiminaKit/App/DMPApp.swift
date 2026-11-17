@@ -452,6 +452,8 @@ public class DMPApp {
             NetworkAPI.clearApp(self.appId)
             NetworkTypeAPI.clearApp(self.appId)
             ScreenAPI.clearApp(self.appId)
+            SensorAPI.clearApp(self.appId)
+            AudioAPI.clearApp(appId: self.appId)
             FileAPI.clearOpenFiles(appId: self.appId)
             // 正在后台写盘的 canvas 导出属于这一代 runtime；换代之后它的回调没有接收方，
             // 已经发布的文件也不会有人来取。
@@ -675,6 +677,8 @@ public class DMPApp {
         NetworkAPI.clearApp(appId)
         NetworkTypeAPI.clearApp(appId)
         ScreenAPI.clearApp(appId)
+        SensorAPI.clearApp(appId)
+        AudioAPI.clearApp(appId: appId)
         FileAPI.clearOpenFiles(appId: appId)
         ImageAPI.clearApp(appId)
 
