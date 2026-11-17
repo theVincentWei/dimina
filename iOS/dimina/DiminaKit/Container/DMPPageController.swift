@@ -50,6 +50,9 @@ public class DMPPageController: UIViewController {
     private var homeButtonLeadingAfterBack: NSLayoutConstraint?
     private var miniProgramMenuContainerView: UIView?
     private var isClosingMiniProgram = false
+    // 「问AI悬浮球」本体与⋯菜单「问AI浮窗」瓦片缩微图标（2026-11-17 对齐安卓）
+    private var askAiFloatButton: AskAiFloatButton?
+    private var askAiMenuTileMiniature: AskAiFloatMiniatureView?
     private var webViewTopToNavigationConstraint: NSLayoutConstraint?
     private var webViewTopToViewConstraint: NSLayoutConstraint?
     private var loadingView: UIView?
@@ -123,6 +126,12 @@ public class DMPPageController: UIViewController {
         view.backgroundColor = .white
         setupCustomNavigationBar()
 
+        // 深浅色切换时刷新⋯菜单弹层配色（悬浮球徽章为定稿配色、不随主题）
+        registerForTraitChanges([UITraitUserInterfaceStyle.self]) {
+            (self: DMPPageController, previousCollection: UITraitCollection) in
+            self.refreshMenuForTraitChange()
+        }
+
         // Create SwiftUI view container
         let webViewContainer = DMPWebViewContainer(webview: webview, isRoot: isRoot)
         hostingController = UIHostingController(rootView: webViewContainer)
@@ -157,6 +166,8 @@ public class DMPPageController: UIViewController {
         if loadingView == nil {
             navigator?.bringCapsuleToFront()
         }
+        // 问AI悬浮球显隐跟随持久化开关（返回本页时与新状态对齐）
+        syncAskAiFloatButton()
         setupNavigationBar()
         showPageLoadingIfNeeded()
     }
@@ -579,10 +590,78 @@ public class DMPPageController: UIViewController {
         }
     }
 
+    // MARK: ⋯菜单（对齐安卓 MiniProgramMenuSheet：头部/分割线/四瓦片/取消）
+
+    /// ⋯菜单弹层配色（对齐安卓 DiminaActivity 的 sheet* 色板，深浅各一套；
+    /// 语义=原生壳层 chrome，跟系统深浅色走，与小程序是否声明 darkmode 无关）。
+    private struct MiniProgramMenuPalette {
+        let container: UIColor
+        let iconBg: UIColor
+        let avatar: UIColor
+        let title: UIColor
+        let sub: UIColor
+        let tileBg: UIColor
+        let tileIcon: UIColor
+        let tileLabel: UIColor
+        let dividerTop: UIColor
+        let dividerBottom: UIColor
+        let cancel: UIColor
+
+        static func standard(isDark: Bool) -> MiniProgramMenuPalette {
+            func rgb(_ r: Int, _ g: Int, _ b: Int) -> UIColor {
+                UIColor(red: CGFloat(r) / 255, green: CGFloat(g) / 255, blue: CGFloat(b) / 255, alpha: 1)
+            }
+            if isDark {
+                return MiniProgramMenuPalette(
+                    container: rgb(0x1D, 0x1F, 0x27),
+                    iconBg: rgb(0x2A, 0x2D, 0x34),
+                    avatar: rgb(0x9A, 0xA1, 0xA9),
+                    title: rgb(0xE8, 0xEA, 0xED),
+                    sub: rgb(0x9A, 0xA1, 0xA9),
+                    tileBg: rgb(0x2A, 0x2D, 0x34),
+                    tileIcon: rgb(0xE8, 0xEA, 0xED),
+                    tileLabel: rgb(0xB9, 0xBF, 0xC7),
+                    dividerTop: rgb(0x2A, 0x2D, 0x34),
+                    dividerBottom: rgb(0x2A, 0x2D, 0x34),
+                    cancel: rgb(0x7D, 0x90, 0xB8)
+                )
+            }
+            return MiniProgramMenuPalette(
+                container: .white,
+                iconBg: rgb(0xF4, 0xF4, 0xF4),
+                avatar: rgb(0x8A, 0x8A, 0x8A),
+                title: rgb(0x20, 0x20, 0x20),
+                sub: rgb(0x9A, 0x9A, 0x9A),
+                tileBg: rgb(0xF8, 0xF8, 0xF8),
+                tileIcon: rgb(0x33, 0x33, 0x33),
+                tileLabel: rgb(0x68, 0x68, 0x68),
+                dividerTop: rgb(0xF2, 0xF2, 0xF2),
+                dividerBottom: rgb(0xED, 0xED, 0xED),
+                cancel: rgb(0x57, 0x6B, 0x95)
+            )
+        }
+    }
+
+    private var isDarkMenuChrome: Bool {
+        traitCollection.userInterfaceStyle == .dark
+    }
+
+    /// 版本副标题（对齐安卓：v版本名；缺版本名回落「小程序」）。
+    private var menuVersionSubtitle: String {
+        let trimmed = appConfig.versionName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmed.isEmpty else {
+            return "小程序"
+        }
+        let normalized = trimmed.hasPrefix("v") || trimmed.hasPrefix("V") ? String(trimmed.dropFirst()) : trimmed
+        return "v" + normalized
+    }
+
     private func showMiniProgramMenu() {
         guard miniProgramMenuContainerView == nil else {
             return
         }
+
+        let palette = MiniProgramMenuPalette.standard(isDark: isDarkMenuChrome)
 
         let overlay = UIControl()
         overlay.translatesAutoresizingMaskIntoConstraints = false
@@ -591,33 +670,48 @@ public class DMPPageController: UIViewController {
 
         let sheetView = UIView()
         sheetView.translatesAutoresizingMaskIntoConstraints = false
-        sheetView.backgroundColor = .white
+        sheetView.backgroundColor = palette.container
         sheetView.layer.cornerRadius = 18
         if #available(iOS 11.0, *) {
             sheetView.layer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
         }
 
-        let iconLabel = UILabel()
-        iconLabel.translatesAutoresizingMaskIntoConstraints = false
-        iconLabel.text = String(appConfig.appName.prefix(1)).isEmpty ? "小" : String(appConfig.appName.prefix(1))
-        iconLabel.textAlignment = .center
-        iconLabel.font = .systemFont(ofSize: 18, weight: .medium)
-        iconLabel.textColor = UIColor(red: 138 / 255, green: 138 / 255, blue: 138 / 255, alpha: 1)
-        iconLabel.backgroundColor = UIColor(red: 244 / 255, green: 244 / 255, blue: 244 / 255, alpha: 1)
-        iconLabel.layer.cornerRadius = 22
-        iconLabel.clipsToBounds = true
+        // 头部图标：宿主传入的真包图标（DMPAppConfig.icon=png 文件路径）优先，
+        // 无则回落首字母瓦片（对齐安卓 headerIcon 空分支）。
+        let headerIconView: UIView
+        if let iconPath = appConfig.icon, !iconPath.isEmpty,
+            let iconImage = UIImage(contentsOfFile: iconPath)
+        {
+            let imageView = UIImageView(image: iconImage)
+            imageView.contentMode = .scaleAspectFill
+            imageView.clipsToBounds = true
+            imageView.layer.cornerRadius = 22
+            headerIconView = imageView
+        } else {
+            let iconLabel = UILabel()
+            iconLabel.text = String(appConfig.appName.prefix(1)).isEmpty
+                ? "小" : String(appConfig.appName.prefix(1))
+            iconLabel.textAlignment = .center
+            iconLabel.font = .systemFont(ofSize: 18, weight: .medium)
+            iconLabel.textColor = palette.avatar
+            iconLabel.backgroundColor = palette.iconBg
+            iconLabel.layer.cornerRadius = 22
+            iconLabel.clipsToBounds = true
+            headerIconView = iconLabel
+        }
+        headerIconView.translatesAutoresizingMaskIntoConstraints = false
 
         let titleLabel = UILabel()
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
         titleLabel.text = appConfig.appName
         titleLabel.font = .systemFont(ofSize: 18, weight: .semibold)
-        titleLabel.textColor = UIColor(red: 32 / 255, green: 32 / 255, blue: 32 / 255, alpha: 1)
+        titleLabel.textColor = palette.title
 
         let subtitleLabel = UILabel()
         subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
-        subtitleLabel.text = "小程序"
+        subtitleLabel.text = menuVersionSubtitle
         subtitleLabel.font = .systemFont(ofSize: 14)
-        subtitleLabel.textColor = UIColor(red: 154 / 255, green: 154 / 255, blue: 154 / 255, alpha: 1)
+        subtitleLabel.textColor = palette.sub
 
         let titleStack = UIStackView(arrangedSubviews: [titleLabel, subtitleLabel])
         titleStack.translatesAutoresizingMaskIntoConstraints = false
@@ -626,43 +720,54 @@ public class DMPPageController: UIViewController {
 
         let headerView = UIView()
         headerView.translatesAutoresizingMaskIntoConstraints = false
-        headerView.addSubview(iconLabel)
+        headerView.addSubview(headerIconView)
         headerView.addSubview(titleStack)
 
         let topDivider = UIView()
         topDivider.translatesAutoresizingMaskIntoConstraints = false
-        topDivider.backgroundColor = UIColor(red: 242 / 255, green: 242 / 255, blue: 242 / 255, alpha: 1)
+        topDivider.backgroundColor = palette.dividerTop
 
-        let iconColor = UIColor(red: 51 / 255, green: 51 / 255, blue: 51 / 255, alpha: 1)
         let symbolConfiguration = UIImage.SymbolConfiguration(pointSize: 24, weight: .medium)
+        func tintedSymbol(_ name: String) -> UIImage {
+            UIImage(systemName: name, withConfiguration: symbolConfiguration)?
+                .withTintColor(palette.tileIcon, renderingMode: .alwaysOriginal) ?? UIImage()
+        }
 
+        // 四瓦片顺序对齐安卓：问AI浮窗 / 浮窗 / 重新进入小程序 / 关闭小程序
+        let askAiItem = makeMiniProgramAskAiMenuItem(palette: palette, action: #selector(miniProgramMenuAskAiTapped))
+        let floatItem = makeMiniProgramMenuItem(
+            title: "浮窗",
+            image: tintedSymbol("picture.in.picture"),
+            action: #selector(miniProgramMenuFloatTapped),
+            palette: palette
+        )
         let reenterItem = makeMiniProgramMenuItem(
             title: "重新进入\n小程序",
-            image: UIImage(systemName: "arrow.clockwise", withConfiguration: symbolConfiguration)?
-                .withTintColor(iconColor, renderingMode: .alwaysOriginal) ?? UIImage(),
-            action: #selector(miniProgramMenuReenterTapped)
+            image: tintedSymbol("arrow.clockwise"),
+            action: #selector(miniProgramMenuReenterTapped),
+            palette: palette
         )
         let closeItem = makeMiniProgramMenuItem(
             title: "关闭小程序",
-            image: UIImage(systemName: "xmark", withConfiguration: symbolConfiguration)?
-                .withTintColor(iconColor, renderingMode: .alwaysOriginal) ?? UIImage(),
-            action: #selector(miniProgramMenuCloseTapped)
+            image: tintedSymbol("xmark"),
+            action: #selector(miniProgramMenuCloseTapped),
+            palette: palette
         )
 
-        let actionStack = UIStackView(arrangedSubviews: [reenterItem, closeItem])
+        let actionStack = UIStackView(arrangedSubviews: [askAiItem, floatItem, reenterItem, closeItem])
         actionStack.translatesAutoresizingMaskIntoConstraints = false
         actionStack.axis = .horizontal
         actionStack.distribution = .fill
-        actionStack.spacing = 16
+        actionStack.alignment = .top
 
         let bottomDivider = UIView()
         bottomDivider.translatesAutoresizingMaskIntoConstraints = false
-        bottomDivider.backgroundColor = UIColor(red: 237 / 255, green: 237 / 255, blue: 237 / 255, alpha: 1)
+        bottomDivider.backgroundColor = palette.dividerBottom
 
         let cancelButton = UIButton(type: .custom)
         cancelButton.translatesAutoresizingMaskIntoConstraints = false
         cancelButton.setTitle("取消", for: .normal)
-        cancelButton.setTitleColor(UIColor(red: 87 / 255, green: 107 / 255, blue: 149 / 255, alpha: 1), for: .normal)
+        cancelButton.setTitleColor(palette.cancel, for: .normal)
         cancelButton.titleLabel?.font = .systemFont(ofSize: 18)
         cancelButton.addTarget(self, action: #selector(dismissMiniProgramMenu), for: .touchUpInside)
 
@@ -676,6 +781,12 @@ public class DMPPageController: UIViewController {
         sheetView.addSubview(actionStack)
         sheetView.addSubview(bottomDivider)
         sheetView.addSubview(cancelButton)
+
+        // 瓦片间距按屏宽自适应（78pt 固定瓦片宽对齐安卓；窄屏收间距、弹层居中）
+        let tileWidth: CGFloat = 78
+        let tileSpacing = miniProgramMenuTileSpacing(in: presentationView, tileWidth: tileWidth, tileCount: 4)
+        let stackWidth = tileWidth * 4 + tileSpacing * 3
+        let stackLeading = max(8, (presentationView.bounds.width - stackWidth) / 2)
 
         let bottomInset = presentationView.safeAreaInsets.bottom
         NSLayoutConstraint.activate([
@@ -693,12 +804,12 @@ public class DMPPageController: UIViewController {
             headerView.trailingAnchor.constraint(equalTo: sheetView.trailingAnchor),
             headerView.heightAnchor.constraint(equalToConstant: 84),
 
-            iconLabel.leadingAnchor.constraint(equalTo: headerView.leadingAnchor, constant: 24),
-            iconLabel.centerYAnchor.constraint(equalTo: headerView.centerYAnchor),
-            iconLabel.widthAnchor.constraint(equalToConstant: 44),
-            iconLabel.heightAnchor.constraint(equalToConstant: 44),
+            headerIconView.leadingAnchor.constraint(equalTo: headerView.leadingAnchor, constant: 24),
+            headerIconView.centerYAnchor.constraint(equalTo: headerView.centerYAnchor),
+            headerIconView.widthAnchor.constraint(equalToConstant: 44),
+            headerIconView.heightAnchor.constraint(equalToConstant: 44),
 
-            titleStack.leadingAnchor.constraint(equalTo: iconLabel.trailingAnchor, constant: 14),
+            titleStack.leadingAnchor.constraint(equalTo: headerIconView.trailingAnchor, constant: 14),
             titleStack.centerYAnchor.constraint(equalTo: headerView.centerYAnchor),
             titleStack.trailingAnchor.constraint(lessThanOrEqualTo: headerView.trailingAnchor, constant: -24),
 
@@ -708,8 +819,8 @@ public class DMPPageController: UIViewController {
             topDivider.heightAnchor.constraint(equalToConstant: 1 / UIScreen.main.scale),
 
             actionStack.topAnchor.constraint(equalTo: topDivider.bottomAnchor, constant: 20),
-            actionStack.leadingAnchor.constraint(equalTo: sheetView.leadingAnchor, constant: 24),
-            actionStack.widthAnchor.constraint(equalToConstant: 172),
+            actionStack.leadingAnchor.constraint(equalTo: sheetView.leadingAnchor, constant: stackLeading),
+            actionStack.widthAnchor.constraint(equalToConstant: stackWidth),
             actionStack.heightAnchor.constraint(equalToConstant: 94),
 
             bottomDivider.topAnchor.constraint(equalTo: actionStack.bottomAnchor, constant: 20),
@@ -728,14 +839,27 @@ public class DMPPageController: UIViewController {
         presentationView.bringSubviewToFront(overlay)
     }
 
-    private func makeMiniProgramMenuItem(title: String, image: UIImage, action: Selector) -> UIControl {
+    /// 瓦片横向间距：宽屏 16pt（对齐安卓 spacedBy 16），窄屏等比收紧、下限 6pt。
+    private func miniProgramMenuTileSpacing(in presentationView: UIView, tileWidth: CGFloat, tileCount: Int) -> CGFloat {
+        let horizontalPadding: CGFloat = 24
+        let available = presentationView.bounds.width - horizontalPadding * 2
+        let ideal = floor((available - CGFloat(tileCount) * tileWidth) / CGFloat(max(tileCount - 1, 1)))
+        return max(6, min(16, ideal))
+    }
+
+    private func makeMiniProgramMenuItem(
+        title: String,
+        image: UIImage,
+        action: Selector,
+        palette: MiniProgramMenuPalette
+    ) -> UIControl {
         let control = UIControl()
         control.translatesAutoresizingMaskIntoConstraints = false
         control.addTarget(self, action: action, for: .touchUpInside)
 
         let iconContainer = UIView()
         iconContainer.translatesAutoresizingMaskIntoConstraints = false
-        iconContainer.backgroundColor = UIColor(red: 248 / 255, green: 248 / 255, blue: 248 / 255, alpha: 1)
+        iconContainer.backgroundColor = palette.tileBg
         iconContainer.layer.cornerRadius = 10
         iconContainer.isUserInteractionEnabled = false
 
@@ -747,7 +871,7 @@ public class DMPPageController: UIViewController {
         label.translatesAutoresizingMaskIntoConstraints = false
         label.text = title
         label.font = .systemFont(ofSize: 13)
-        label.textColor = UIColor(red: 104 / 255, green: 104 / 255, blue: 104 / 255, alpha: 1)
+        label.textColor = palette.tileLabel
         label.textAlignment = .center
         label.numberOfLines = 2
 
@@ -777,9 +901,74 @@ public class DMPPageController: UIViewController {
         return control
     }
 
+    /// 「问AI浮窗」开关瓦片（对齐安卓 MiniProgramAskAiMenuTile）：图标=悬浮球本体缩微，
+    /// 亮=悬浮球显示中、整图标置灰=已关闭；点击 toggle 同一持久化状态，弹层不收。
+    private func makeMiniProgramAskAiMenuItem(
+        palette: MiniProgramMenuPalette,
+        action: Selector
+    ) -> UIControl {
+        let control = UIControl()
+        control.translatesAutoresizingMaskIntoConstraints = false
+        control.addTarget(self, action: action, for: .touchUpInside)
+
+        let iconContainer = UIView()
+        iconContainer.translatesAutoresizingMaskIntoConstraints = false
+        iconContainer.backgroundColor = palette.tileBg
+        iconContainer.layer.cornerRadius = 10
+        iconContainer.isUserInteractionEnabled = false
+
+        let miniature = AskAiFloatMiniatureView(dimmed: !AskAiFloatStore.isEnabled, isDark: isDarkMenuChrome)
+        miniature.translatesAutoresizingMaskIntoConstraints = false
+        askAiMenuTileMiniature = miniature
+
+        let label = UILabel()
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.text = "问AI浮窗"
+        label.font = .systemFont(ofSize: 13)
+        label.textColor = palette.tileLabel
+        label.textAlignment = .center
+        label.numberOfLines = 1
+
+        control.addSubview(iconContainer)
+        iconContainer.addSubview(miniature)
+        control.addSubview(label)
+
+        NSLayoutConstraint.activate([
+            control.widthAnchor.constraint(equalToConstant: 78),
+
+            iconContainer.topAnchor.constraint(equalTo: control.topAnchor),
+            iconContainer.centerXAnchor.constraint(equalTo: control.centerXAnchor),
+            iconContainer.widthAnchor.constraint(equalToConstant: 52),
+            iconContainer.heightAnchor.constraint(equalToConstant: 52),
+
+            miniature.centerXAnchor.constraint(equalTo: iconContainer.centerXAnchor),
+            miniature.centerYAnchor.constraint(equalTo: iconContainer.centerYAnchor),
+            miniature.widthAnchor.constraint(equalToConstant: 30),
+            miniature.heightAnchor.constraint(equalToConstant: 30),
+
+            label.topAnchor.constraint(equalTo: iconContainer.bottomAnchor, constant: 8),
+            label.leadingAnchor.constraint(equalTo: control.leadingAnchor),
+            label.trailingAnchor.constraint(equalTo: control.trailingAnchor),
+            label.bottomAnchor.constraint(lessThanOrEqualTo: control.bottomAnchor),
+        ])
+
+        return control
+    }
+
     @objc private func dismissMiniProgramMenu() {
         miniProgramMenuContainerView?.removeFromSuperview()
         miniProgramMenuContainerView = nil
+        askAiMenuTileMiniature = nil
+    }
+
+    /// 深浅色切换：菜单开着则按新配色重建（瓦片缩微图标/悬浮球徽章随之重绘，
+    /// 悬浮球徽章本身为定稿配色、不随主题）。
+    private func refreshMenuForTraitChange() {
+        guard miniProgramMenuContainerView != nil else {
+            return
+        }
+        dismissMiniProgramMenu()
+        showMiniProgramMenu()
     }
 
     @objc private func miniProgramMenuReenterTapped() {
@@ -792,6 +981,119 @@ public class DMPPageController: UIViewController {
     @objc private func miniProgramMenuCloseTapped() {
         dismissMiniProgramMenu()
         closeMiniProgramFromCapsule()
+    }
+
+    @objc private func miniProgramMenuAskAiTapped() {
+        let next = !AskAiFloatStore.isEnabled
+        AskAiFloatStore.isEnabled = next
+        askAiMenuTileMiniature?.update(dimmed: !next, isDark: isDarkMenuChrome)
+        // 同步当前页面实例的悬浮球显隐（其它页面 viewWillAppear 时会对齐）
+        syncAskAiFloatButton()
+    }
+
+    @objc private func miniProgramMenuFloatTapped() {
+        dismissMiniProgramMenu()
+        floatMiniProgramFromMenu()
+    }
+
+    /// 「浮窗」瓦片：整栈收后台（不销毁运行时/页面栈，对齐安卓 hideMiniProgram），
+    /// 成功后 POST dimina.miniProgramFloated 让宿主展示浮窗球。
+    private func floatMiniProgramFromMenu() {
+        guard let app, !isClosingMiniProgram else {
+            return
+        }
+        isClosingMiniProgram = true
+        navigator?.setCapsuleEnabled(false)
+
+        let appId = app.getAppId()
+        let appName = appConfig.appName
+        Task { @MainActor [weak self] in
+            do {
+                try await app.hideMiniProgram()
+                self?.isClosingMiniProgram = false
+                NotificationCenter.default.post(
+                    name: .diminaMiniProgramFloated,
+                    object: nil,
+                    userInfo: [
+                        DMPMiniProgramEventUserInfo.appId: appId,
+                        DMPMiniProgramEventUserInfo.appName: appName
+                    ]
+                )
+            } catch {
+                self?.isClosingMiniProgram = false
+                self?.navigator?.setCapsuleEnabled(true)
+                DMPLogger.debug("menu float rejected: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    // MARK: 问AI悬浮球（挂载/摘除与事件上报）
+
+    /// 悬浮球显隐跟随持久化开关 dimina_ask_ai_float_enabled（默认显示中）。
+    private func syncAskAiFloatButton() {
+        if AskAiFloatStore.isEnabled {
+            mountAskAiFloatButtonIfNeeded()
+        } else {
+            removeAskAiFloatButton()
+        }
+    }
+
+    private func mountAskAiFloatButtonIfNeeded() {
+        guard askAiFloatButton == nil else {
+            return
+        }
+        let button = AskAiFloatButton(frame: CGRect(x: 0, y: 0, width: 44, height: 44))
+        button.onTap = { [weak self] in
+            self?.handleAskAiFloatTapped()
+        }
+        button.onClose = { [weak self] in
+            self?.handleAskAiFloatClosed()
+        }
+        view.addSubview(button)
+        view.bringSubviewToFront(button)
+        askAiFloatButton = button
+    }
+
+    private func removeAskAiFloatButton() {
+        guard let button = askAiFloatButton else {
+            return
+        }
+        askAiFloatButton = nil
+        button.prepareForRemoval()
+    }
+
+    /// 长按 ✕：持久化关闭并摘除悬浮球（对齐安卓 setAskAiFloatEnabled(false)）。
+    private func handleAskAiFloatClosed() {
+        AskAiFloatStore.isEnabled = false
+        removeAskAiFloatButton()
+    }
+
+    /// 悬浮球点击：POST dimina.miniProgramAskAiInvoked（容器只上报，不认识
+    /// 「问AI」业务语义；收小程序由宿主收到事件后决定）。
+    private func handleAskAiFloatTapped() {
+        let appId = app?.getAppId() ?? appConfig.appId
+        var userInfo: [String: Any] = [DMPMiniProgramEventUserInfo.appId: appId]
+        if let pageTitle = normalizedPageContext(customNavigationTitleLabel?.text) {
+            userInfo[DMPMiniProgramEventUserInfo.pageTitle] = pageTitle
+        }
+        if let pagePath = normalizedPageContext(webview.getPagePath()) {
+            userInfo[DMPMiniProgramEventUserInfo.pagePath] = pagePath
+        }
+        NotificationCenter.default.post(
+            name: .diminaMiniProgramAskAiInvoked,
+            object: nil,
+            userInfo: userInfo
+        )
+    }
+
+    /// 事件上下文归一（对齐安卓 AskAiEventPayload：blank 归 nil，不强造）。
+    private func normalizedPageContext(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !trimmed.isEmpty
+        else {
+            return nil
+        }
+        return trimmed
     }
 
     // Set navigation bar style
@@ -985,6 +1287,14 @@ public class DMPPageController: UIViewController {
         DMPLogger.debug("🗑️ DMPPageController: Destroy WebView (ID: \(webview.getWebViewId()))")
         isWebViewDestroyed = true
         webview.clearLoadingStateObserver(ownerToken: loadingStateObserverToken)
+
+        // 问AI悬浮球随页面拆毁移除（deinit 可能不在主线程，UI 操作投递主线程）
+        if let floatButton = askAiFloatButton {
+            askAiFloatButton = nil
+            DispatchQueue.main.async {
+                floatButton.prepareForRemoval()
+            }
+        }
 
         // [game-touch] BEGIN 桥销毁即摘快路：丢挂起 move + 摘手势（只摘自己实例，
         // WebView 复用场景不影响新页面刚挂的快路）（整块可删）。
