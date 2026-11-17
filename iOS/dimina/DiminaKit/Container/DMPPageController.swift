@@ -127,9 +127,13 @@ public class DMPPageController: UIViewController {
         setupCustomNavigationBar()
 
         // 深浅色切换时刷新⋯菜单弹层配色（悬浮球徽章为定稿配色、不随主题）
-        registerForTraitChanges([UITraitUserInterfaceStyle.self]) {
-            (self: DMPPageController, previousCollection: UITraitCollection) in
-            self.refreshMenuForTraitChange()
+        // iOS 17+ 走 registerForTraitChanges；14-16 回退 traitCollectionDidChange
+        // （弹层开着时切主题不实时刷新,重建菜单时按当前 trait 取色,可接受）。
+        if #available(iOS 17.0, *) {
+            registerForTraitChanges([UITraitUserInterfaceStyle.self]) {
+                (self: DMPPageController, previousCollection: UITraitCollection) in
+                self.refreshMenuForTraitChange()
+            }
         }
 
         // Create SwiftUI view container
