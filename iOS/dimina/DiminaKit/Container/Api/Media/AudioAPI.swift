@@ -1350,8 +1350,13 @@ private final class RecorderSession {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let name = "REC_\(Int64(Date().timeIntervalSince1970 * 1000))_\(UUID().uuidString.prefix(8)).\(extensionName)"
             let file = directory.appendingPathComponent(name)
-            try? AVAudioSession.sharedInstance().setCategory(.playAndRecord)
-            try? AVAudioSession.sharedInstance().setActive(true)
+            do {
+                try AVAudioSession.sharedInstance().setCategory(.playAndRecord, mode: .spokenAudio)
+                try AVAudioSession.sharedInstance().setActive(true)
+            } catch {
+                // 会话切换失败别再静默:NSLog 出来,真机 console 一眼定位录音启动失败根因。
+                DMPLogger.debug("Recorder session setup failed: \(error.localizedDescription)")
+            }
             withLock { finalized = false }
             let created = RecorderEngine(
                 queue: queue,
@@ -1693,6 +1698,8 @@ private final class RecorderEngine: NSObject, AVAudioRecorderDelegate {
         }
         guard started else {
             self.recorder = nil
+            let s = AVAudioSession.sharedInstance()
+            DMPLogger.debug("RecorderEngine record()=false category=\(s.category.rawValue) mode=\(s.mode.rawValue) inputAvailable=\(s.isInputAvailable) inputs=\(s.availableInputs?.map(\.portType.rawValue) ?? []) routeOut=\(s.currentRoute.outputs.first?.portType.rawValue ?? "nil") sessionActive=\(s.isOtherAudioPlaying)")
             throw AudioError("audio record start failed")
         }
     }
