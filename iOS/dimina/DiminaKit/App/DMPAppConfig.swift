@@ -25,7 +25,10 @@ public struct DMPAppConfig : Identifiable {
     }
 
     var color: Color?
-    var icon: String?
+
+    /// Public for host apps (dsh-go iOS bridge): png 文件绝对路径,容器 ⋯菜单头部
+    /// 按 it 加载真包图标;nil/文件缺失回落首字母瓦片(对齐安卓 iconPng 通道)。
+    public var icon: String?
 
     // 符合Identifiable协议的id属性
     public var id: String { appId }
