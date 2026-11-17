@@ -1690,16 +1690,30 @@ private final class RecorderEngine: NSObject, AVAudioRecorderDelegate {
         let recorder = try AVAudioRecorder(url: url, settings: settings)
         recorder.delegate = self
         self.recorder = recorder
-        let started: Bool
-        if maxDurationMs > 0 {
-            started = recorder.record(forDuration: Double(maxDurationMs) / 1000.0)
-        } else {
-            started = recorder.record()
+        // iOS 18 实测:setCategory/.setActive 之后立即 record() 可能拿到 false
+        // (硬件路由重配在途)。带重试:每次先重激活会话,间隔 250ms,共 3 次。
+        var started = false
+        let session = AVAudioSession.sharedInstance()
+        for attempt in 1...3 {
+            started = maxDurationMs > 0
+                ? recorder.record(forDuration: Double(maxDurationMs) / 1000.0)
+                : recorder.record()
+            if started { break }
+            DMPLogger.debug("RecorderEngine record() attempt\(attempt)=false, reactivating session")
+            try? session.setActive(false, options: [.notifyOthersOnDeactivation])
+            Thread.sleep(forTimeInterval: 0.15)
+            do {
+                try session.setCategory(.playAndRecord, mode: .spokenAudio)
+                try session.setActive(true)
+            } catch {
+                DMPLogger.debug("RecorderEngine reactivate failed: \(error.localizedDescription)")
+            }
+            Thread.sleep(forTimeInterval: 0.1)
         }
         guard started else {
             self.recorder = nil
             let s = AVAudioSession.sharedInstance()
-            DMPLogger.debug("RecorderEngine record()=false category=\(s.category.rawValue) mode=\(s.mode.rawValue) inputAvailable=\(s.isInputAvailable) inputs=\(s.availableInputs?.map(\.portType.rawValue) ?? []) routeOut=\(s.currentRoute.outputs.first?.portType.rawValue ?? "nil") sessionActive=\(s.isOtherAudioPlaying)")
+            DMPLogger.debug("RecorderEngine record()=false after retries category=\(s.category.rawValue) mode=\(s.mode.rawValue) inputAvailable=\(s.isInputAvailable) inputs=\(s.availableInputs?.map(\.portType.rawValue) ?? []) routeOut=\(s.currentRoute.outputs.first?.portType.rawValue ?? "nil") otherPlaying=\(s.isOtherAudioPlaying)")
             throw AudioError("audio record start failed")
         }
     }
