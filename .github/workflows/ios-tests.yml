@@ -164,6 +164,13 @@ jobs:
 
       - name: Run unit tests
         working-directory: ./iOS
+        env:
+          # Pass CI=true into the simulator test runner process: shell env does not
+          # propagate into simulator apps, so Swift Testing traits that gate on
+          # CI-only skips (WebGLBridgeTests byte-exact canvas transport) need the
+          # TEST_RUNNER_ pass-through to observe it.
+          TEST_RUNNER_CI: true
+          TEST_RUNNER_GITHUB_ACTIONS: true
         run: |
           xcodebuild test \
             -project dimina.xcodeproj \
