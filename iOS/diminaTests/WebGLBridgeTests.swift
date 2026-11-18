@@ -152,7 +152,13 @@ extension DMPUIIntegrationTests {
             return pixel
         }
 
-        @Test func bundledSDKQueriesDrawsAndRecoversOnWebKit() async throws {
+        // Byte-exact canvas binary transport requires GPU-backed WebGL: the
+        // software-rendered stack on GitHub-hosted simulators fails readPixels with
+        // GL_INVALID_OPERATION (1282) and returns mismatched bytes. Run these two
+        // checks on GPU-backed simulators or real devices instead.
+        @Test(.enabled(if: ProcessInfo.processInfo.environment["GITHUB_ACTIONS"] != "true",
+                       "Byte-exact canvas binary transport needs GPU-backed WebGL; skip on software-rendered CI simulators"))
+        func bundledSDKQueriesDrawsAndRecoversOnWebKit() async throws {
             DMPResourceManager.prepareSdk()
             let owner = "webgl-\(UUID().uuidString)"
             let app = DMPApp(appConfig: DMPAppConfig(appName: "WebGL regression", appId: owner), appIndex: -1)
@@ -344,7 +350,9 @@ extension DMPUIIntegrationTests {
             return try #require(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
         }
 
-        @Test func bundledVideoPAGCanvasTransportComparison() async throws {
+        @Test(.enabled(if: ProcessInfo.processInfo.environment["GITHUB_ACTIONS"] != "true",
+                       "Byte-exact canvas binary transport needs GPU-backed WebGL; skip on software-rendered CI simulators"))
+        func bundledVideoPAGCanvasTransportComparison() async throws {
             let owner = "pag-canvas-\(UUID().uuidString)"
             DMPResourceManager.prepareSdk()
             try #require(DMPSandboxManager.initBundleDirectoryForApp(appId: owner))
