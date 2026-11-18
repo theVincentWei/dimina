@@ -2,10 +2,6 @@ name: Frontend Tests
 
 on:
   pull_request:
-    paths:
-      - 'fe/**'
-      - 'examples/miniprogram/**'
-      - '.github/workflows/fe-tests.yml'
   push:
     paths:
       - 'fe/**'

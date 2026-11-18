@@ -8,11 +8,6 @@ on:
       - 'cmake/**'
       - '.github/workflows/harmony-tests.yml'
   pull_request:
-    paths:
-      - 'harmony/**'
-      - 'shared/**'
-      - 'cmake/**'
-      - '.github/workflows/harmony-tests.yml'
   workflow_dispatch:
 
 permissions:

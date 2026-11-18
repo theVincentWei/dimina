@@ -3,9 +3,6 @@ name: Frontend Lint
 on:
   # Fork code must run in the pull request's restricted security context.
   pull_request:
-    paths:
-      - 'fe/**'
-      - 'examples/miniprogram/**'
   workflow_dispatch:
 
 permissions:
